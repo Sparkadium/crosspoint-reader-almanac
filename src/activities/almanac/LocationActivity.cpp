@@ -10,17 +10,24 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <new>
 #include <string>
+#include <variant>
 
 #include "Location.h"
 #include "MappedInputManager.h"
+#include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+
 namespace {
 constexpr int BIG_FONT = NOTOSERIF_18_FONT_ID;
 constexpr int SMALL = SMALL_FONT_ID;
 const char* LABEL[] = {"latitude", "longitude", "utc offset", "daylight saving"};
+const char* PROMPT[] = {"Latitude (e.g. 45.3475)", "Longitude, east positive (e.g. -75.7566)",
+                        "UTC offset (e.g. -5:00 or -300)", ""};
 }  // namespace
 
 void LocationActivity::onEnter() {
@@ -32,9 +39,9 @@ void LocationActivity::onEnter() {
   offMin_ = Location::get().baseOffsetMin;
   dstRule_ = Location::get().dstRule;
   field_ = F_LAT;
-  dirty_ = false;
+  dirty_ = confirmedExit_ = false;
   status_.clear();
-  sawConfirmPress_ = sawBackPress_ = false;
+  confirmHeld_ = confirmLong_ = sawBackPress_ = false;
   requestUpdate();
 }
 
@@ -51,11 +58,11 @@ void LocationActivity::bump(int dir) {
       break;
     case F_LON:
       lon_ += dir * step;
-      if (lon_ > 180.0) lon_ -= 360.0;   // wrap the antimeridian
+      if (lon_ > 180.0) lon_ -= 360.0;  // wrap the antimeridian
       if (lon_ < -180.0) lon_ += 360.0;
       break;
     case F_OFFSET:
-      offMin_ += dir * 15;               // quarter-hour zones exist (+05:45)
+      offMin_ += dir * 15;  // quarter-hour zones exist (+05:45)
       if (offMin_ > 840) offMin_ = -720;
       if (offMin_ < -720) offMin_ = 840;
       break;
@@ -66,39 +73,138 @@ void LocationActivity::bump(int dir) {
       break;
   }
   dirty_ = true;
+  confirmedExit_ = false;
   status_.clear();
 }
 
+// Accepts "-75.7566" for coordinates; "-5:00", "-5", or "-300" for the offset.
+void LocationActivity::applyTyped(const std::string& t) {
+  if (t.empty()) return;
+  switch (field_) {
+    case F_LAT: {
+      const double v = atof(t.c_str());
+      if (v < -90.0 || v > 90.0) { status_ = "Latitude must be -90 to 90"; return; }
+      lat_ = v;
+      break;
+    }
+    case F_LON: {
+      const double v = atof(t.c_str());
+      if (v < -180.0 || v > 180.0) { status_ = "Longitude must be -180 to 180"; return; }
+      lon_ = v;
+      break;
+    }
+    case F_OFFSET: {
+      long mins;
+      const size_t colon = t.find(':');
+      if (colon != std::string::npos) {                    // "-5:30"
+        const long h = strtol(t.substr(0, colon).c_str(), nullptr, 10);
+        const long m = strtol(t.substr(colon + 1).c_str(), nullptr, 10);
+        mins = h * 60 + (h < 0 || t[0] == '-' ? -m : m);
+      } else {
+        const long n = strtol(t.c_str(), nullptr, 10);
+        mins = (labs(n) <= 14) ? n * 60 : n;               // hours, else minutes
+      }
+      if (mins < -720 || mins > 840) { status_ = "Offset must be -12:00 to +14:00"; return; }
+      offMin_ = (int32_t)mins;
+      break;
+    }
+    default:
+      return;
+  }
+  dirty_ = true;
+  confirmedExit_ = false;
+  status_.clear();
+}
+
+void LocationActivity::openTypeEntry() {
+  char cur[24];
+  switch (field_) {
+    case F_LAT: snprintf(cur, sizeof(cur), "%.4f", lat_); break;
+    case F_LON: snprintf(cur, sizeof(cur), "%.4f", lon_); break;
+    case F_OFFSET: Location::offsetLabel(cur, sizeof(cur), offMin_);
+      memmove(cur, cur + 3, strlen(cur) - 2);  // drop the "UTC" prefix, keep -05:00
+      break;
+    default: return;
+  }
+
+  auto handler = [this](const ActivityResult& res) {
+    // The keyboard consumed the press; its trailing release arrives without a
+    // matching press and is discarded by the press/release matching in loop().
+    confirmHeld_ = confirmLong_ = sawBackPress_ = false;
+    if (!res.isCancelled) {
+      const auto* kr = std::get_if<KeyboardResult>(&res.data);
+      if (kr) applyTyped(kr->text);
+    }
+    requestUpdate(true);
+  };
+  startActivityForResult(
+      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, PROMPT[field_], cur, 12),
+      handler);
+}
+
+void LocationActivity::commit() {
+  Location::get().lat = lat_;
+  Location::get().lon = lon_;
+  Location::get().baseOffsetMin = offMin_;
+  Location::get().dstRule = dstRule_;
+  Location::save();
+  dirty_ = false;
+  confirmedExit_ = false;
+  status_ = "Saved";
+}
+
 void LocationActivity::loop() {
+  // ---- Back: leave, but warn once if there is unsaved work ----------------
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) sawBackPress_ = true;
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    if (!sawBackPress_) return;  // leftover from the Almanac menu
+    if (!sawBackPress_) return;  // leftover from a child
     sawBackPress_ = false;
+    if (dirty_ && !confirmedExit_) {
+      confirmedExit_ = true;
+      status_ = "Unsaved. Hold Confirm to save, Back again to discard.";
+      requestUpdate();
+      return;
+    }
     finish();
     return;
   }
 
-  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) sawConfirmPress_ = true;
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (!sawConfirmPress_) return;
-    sawConfirmPress_ = false;
-    Location::get().lat = lat_;
-    Location::get().lon = lon_;
-    Location::get().baseOffsetMin = offMin_;
-    Location::get().dstRule = dstRule_;
-    Location::save();
-    dirty_ = false;
-    status_ = "Saved";
+  // ---- Confirm: tap types the value, hold saves ---------------------------
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+    confirmHeld_ = true;
+    confirmLong_ = false;
+  }
+  if (confirmHeld_ && !confirmLong_ && mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
+      mappedInput.getHeldTime() > LONG_PRESS_MS) {
+    confirmLong_ = true;
+    commit();
     requestUpdate();
     return;
   }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    if (!confirmHeld_) return;  // leftover from a child
+    const bool wasLong = confirmLong_;
+    confirmHeld_ = confirmLong_ = false;
+    if (wasLong) return;  // the hold already saved
+    if (field_ == F_DST) {
+      dstRule_ = (uint8_t)((dstRule_ + 1) % 3);
+      dirty_ = true;
+      confirmedExit_ = false;
+      status_.clear();
+      requestUpdate();
+    } else {
+      openTypeEntry();
+    }
+    return;
+  }
 
+  // ---- D-pad --------------------------------------------------------------
   bool moved = false;
   if (mappedInput.wasPressed(MappedInputManager::Button::Right)) { field_ = (field_ + 1) % F_COUNT; moved = true; }
   if (mappedInput.wasPressed(MappedInputManager::Button::Left)) { field_ = (field_ - 1 + F_COUNT) % F_COUNT; moved = true; }
 
-  // onPressAndContinuous gives the hold-repeat; bump() reads getHeldTime() to
-  // pick its own step size, so a long hold sweeps degrees rather than hundredths.
+  // bump() reads getHeldTime() to pick its own step, so a long hold sweeps
+  // whole degrees rather than hundredths.
   nav_.onPressAndContinuous({MappedInputManager::Button::Up}, [&] { bump(+1); moved = true; });
   nav_.onPressAndContinuous({MappedInputManager::Button::Down}, [&] { bump(-1); moved = true; });
 
@@ -136,23 +242,23 @@ void LocationActivity::render(RenderLock&&) {
   }
 
   int y = top + F_COUNT * rowH + 8;
-  renderer.drawText(SMALL, pad + 4, y, "Left / Right pick a field, Up / Down change it");
+  renderer.drawText(SMALL, pad + 4, y,
+                    field_ == F_DST ? "Confirm cycles the rule" : "Confirm to type the value");
   y += smallH + 4;
-  renderer.drawText(SMALL, pad + 4, y, "Hold Up / Down to move by 0.1 then 1 degree");
+  renderer.drawText(SMALL, pad + 4, y, "Up / Down nudge it. Hold Confirm to save.");
   y += smallH + 4;
   renderer.drawText(SMALL, pad + 4, y, "Longitude is EAST positive. Offset is standard time.");
   y += smallH + 4;
   if (dstRule_ != Location::RULE_NONE)
     renderer.drawText(SMALL, pad + 4, y, "Southern-hemisphere DST is not supported; use none.");
 
+  const int msgY = pageH - m.buttonHintsHeight - m.verticalSpacing - smallH * 2 - 8;
   if (!status_.empty())
-    renderer.drawCenteredText(SMALL, pageH - m.buttonHintsHeight - m.verticalSpacing - smallH * 2 - 8,
-                              status_.c_str());
+    renderer.drawCenteredText(SMALL, msgY, status_.c_str());
   else if (dirty_)
-    renderer.drawCenteredText(SMALL, pageH - m.buttonHintsHeight - m.verticalSpacing - smallH * 2 - 8,
-                              "unsaved");
+    renderer.drawCenteredText(SMALL, msgY, "unsaved");
 
-  const auto labels = mappedInput.mapLabels("Back", "Save", "-", "+");
+  const auto labels = mappedInput.mapLabels("Back", field_ == F_DST ? "Cycle" : "Type", "-", "+");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer();
 }
