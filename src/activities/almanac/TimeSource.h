@@ -28,7 +28,20 @@
 // Requires in platformio.ini:  Rtc=symlink://freeink-sdk/libs/hardware/Rtc
 //
 #include <Preferences.h>
+
+// The freeink Rtc library is an optional dependency. Add this to platformio.ini
+// to get a real hardware clock on boards that have one (X3, Sticky):
+//
+//     Rtc=symlink://freeink-sdk/libs/hardware/Rtc
+//
+// Without it everything still builds; the board simply reports no clock, which
+// is already the truth on the X4.
+// Opt in explicitly rather than sniffing for a header named Rtc.h -- that name
+// is not unique on the include path.
+#ifdef ALMANAC_USE_FREEINK_RTC
 #include <Rtc.h>
+#define ALMANAC_HAS_RTC_LIB 1
+#endif
 
 #include <ctime>
 #include <sys/time.h>
@@ -45,7 +58,7 @@ class TimeSource {
   static void begin() {
     if (started()) return;
     started() = true;
-
+#ifdef ALMANAC_HAS_RTC_LIB
     if (!rtc().begin()) return;  // no RTC on this board (e.g. the X4)
 
     Rtc::DateTime dt;
@@ -53,10 +66,17 @@ class TimeSource {
     if (dt.year < 2025) return;  // never set
 
     setSystemClock(epochFromUtcParts(dt.year, dt.month, dt.day, dt.hour, dt.minute) + dt.second);
+#endif
   }
 
   // True when the board keeps time in hardware, so it survives power-off.
-  static bool hasHardwareClock() { return rtc().present(); }
+  static bool hasHardwareClock() {
+#ifdef ALMANAC_HAS_RTC_LIB
+    return rtc().present();
+#else
+    return false;
+#endif
+  }
 
   static bool isSet() { return time(nullptr) >= MIN_VALID; }
   static time_t nowUtc() { return time(nullptr); }
@@ -66,6 +86,7 @@ class TimeSource {
   static void setUtc(time_t t) {
     setSystemClock(t);
     rememberUtc(t);
+#ifdef ALMANAC_HAS_RTC_LIB
     if (!rtc().present()) return;
 
     int y, mo, d, hh, mm;
@@ -79,6 +100,7 @@ class TimeSource {
     dt.second = (uint8_t)(((t % 60) + 60) % 60);
     dt.weekday = (uint8_t)sky_dowSakamoto(y, mo, d);  // 0 = Sunday, as Rtc expects
     rtc().set(dt);
+#endif
   }
 
   // What the user last entered, or 0. NOT the current time: elapsed time cannot
@@ -154,10 +176,12 @@ class TimeSource {
   }
 
  private:
+#ifdef ALMANAC_HAS_RTC_LIB
   static Rtc& rtc() {
     static Rtc r;
     return r;
   }
+#endif
   static bool& started() {
     static bool b = false;
     return b;
