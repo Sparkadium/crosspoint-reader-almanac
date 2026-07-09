@@ -18,9 +18,11 @@
 
 #include "MappedInputManager.h"
 #include "activities/util/KeyboardEntryActivity.h"
+#include "ListLayout.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
-#include "sprites.h"  // SPR (=20), SPR_FILL[6], SPR_LINE[6]
+#include "sprites.h"    // SPR (=20), SPR_FILL[6], SPR_LINE[6]      -- small squares
+#include "sprites40.h"  // SPR40 (=40), SPR40_FILL/LINE/HALO[6]   -- native, no scaling
 namespace {
 constexpr int TITLE_FONT = UI_12_FONT_ID;
 constexpr int SMALL = SMALL_FONT_ID;
@@ -442,15 +444,26 @@ void ChessActivity::loop() {
 //  Rendering
 // ===========================================================================
 
-// 1-bit art scales losslessly by integer factors: each source pixel becomes a
-// scale x scale block. At 2x the outline strokes become 2px, which reads better
-// at 220ppi than the 1px original did on the watch.
+// Legacy 20px masks, integer-scaled. Doubling pixels cannot add detail -- it
+// just turns every edge into a staircase -- so this is only used on boards whose
+// squares are too small for the native 40px set.
 void ChessActivity::blitSprite(int x, int y, const uint32_t* mask, int scale) const {
   for (uint8_t yy = 0; yy < SPR; yy++) {
     const uint32_t row = mask[yy];
     for (uint8_t xx = 0; xx < SPR; xx++)
       if (row >> xx & 1)
         renderer.fillRect(x + xx * scale, y + yy * scale, scale, scale, BLACK);
+  }
+}
+
+// Native 40px masks: one source pixel, one screen pixel. Rows are 40 bits wide,
+// hence uint64_t.
+void ChessActivity::blitMask40(int x, int y, const uint64_t* mask, bool state) const {
+  for (int yy = 0; yy < SPR40; yy++) {
+    const uint64_t row = mask[yy];
+    if (!row) continue;
+    for (int xx = 0; xx < SPR40; xx++)
+      if ((row >> xx) & 1ULL) renderer.drawPixel(x + xx, y + yy, state);
   }
 }
 
@@ -466,10 +479,13 @@ void ChessActivity::drawBoard() {
   const int X0 = (pageW - SQ * 8) / 2;
   const int Y0 = top + ((bottom - top) - SQ * 8) / 2;
 
+  // Use the native 40px art whenever a square can hold it; fall back to the
+  // scaled 20px set on smaller panels.
+  const bool native = SQ >= SPR40 + 6;
   const int scale = std::max(1, (SQ - 6) / SPR);
-  const int sprPx = SPR * scale;
-  const int haloR = SQ * 11 / 25;       // same proportion as the 25px original
-  const int dither = std::max(3, 3 * scale);
+  const int sprPx = native ? SPR40 : SPR * scale;
+  const int haloR = SQ * 11 / 25;  // only used by the legacy path
+  const int dither = std::max(3, native ? 4 : 3 * scale);
 
   for (uint8_t scr = 0; scr < 64; scr++) {
     const uint8_t sq = toSq(scr);
@@ -482,11 +498,21 @@ void ChessActivity::drawBoard() {
 
     const uint8_t n = cboard[sq];
     if (n) {
-      // white halo disc so a piece never merges with the dark-square stipple
-      if (dark) fillCircleR(renderer, x + SQ / 2, y + SQ / 2, haloR, WHITE);
       const bool white = n <= 6;
       const uint8_t t = white ? n - 1 : n - 7;
-      blitSprite(x + (SQ - sprPx) / 2, y + (SQ - sprPx) / 2, white ? SPR_LINE[t] : SPR_FILL[t], scale);
+      const int sx = x + (SQ - sprPx) / 2, sy = y + (SQ - sprPx) / 2;
+
+      // A piece must never merge with the dark-square stipple. The 40px art is
+      // nearly as wide as the square, so a halo DISC no longer covers its
+      // crenellations, beads and base corners -- use the piece's own dilated
+      // silhouette instead. The legacy path keeps the disc, which fit its 20px art.
+      if (dark) {
+        if (native) blitMask40(sx, sy, SPR40_HALO[t], WHITE);
+        else fillCircleR(renderer, x + SQ / 2, y + SQ / 2, haloR, WHITE);
+      }
+
+      if (native) blitMask40(sx, sy, white ? SPR40_LINE[t] : SPR40_FILL[t], BLACK);
+      else blitSprite(sx, sy, white ? SPR_LINE[t] : SPR_FILL[t], scale);
     }
 
     if (sq == dispFrom || sq == dispTo) renderer.drawRect(x, y, SQ, SQ, BLACK);
@@ -561,17 +587,14 @@ void ChessActivity::drawMenu() {
   const int pageW = renderer.getScreenWidth();
   GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Chess menu");
 
-  const int lineH = renderer.getLineHeight(ROW_FONT);
-  const int boxH = lineH + 16;
-  const int rowH = boxH + 8;
-  const int top = m.topPadding + m.headerHeight + m.verticalSpacing + 8;
+  const ListLayout L = computeListLayout(renderer, MENU_COUNT, menuSel, /*wantBlurb=*/false);
   const int pad = m.contentSidePadding;
 
-  for (int i = 0; i < MENU_COUNT; i++) {
-    const int rowTop = top + i * rowH;
+  for (int k = 0; k < L.rowsPerPage; k++) {
+    const int i = L.firstVisible + k;
     const bool sel = (i == menuSel);
-    if (sel) renderer.fillRect(pad - 6, rowTop, pageW - (pad - 6) * 2, boxH, true);
-    renderer.drawText(ROW_FONT, pad + 4, rowTop + 8, MENU_LABELS[i], !sel);
+    if (sel) renderer.fillRect(pad - 6, L.rowTop(k), pageW - (pad - 6) * 2, L.boxH, true);
+    renderer.drawText(L.titleFont, pad + 4, L.nameTop(k), MENU_LABELS[i], !sel);
   }
 
   const auto labels = mappedInput.mapLabels("Close", "Choose", "Up", "Down");
@@ -584,23 +607,29 @@ void ChessActivity::drawSetMenu() {
   const int pageW = renderer.getScreenWidth();
   GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Rating bands");
 
-  const int lineH = renderer.getLineHeight(ROW_FONT);
-  const int subH = renderer.getLineHeight(SMALL);
-  const int boxH = 8 + lineH + 2 + subH + 8;
-  const int rowH = boxH + 6;
-  const int top = m.topPadding + m.headerHeight + m.verticalSpacing + 8;
+  // Up to 32 bands can exist in a CHP1 file; no font fits 32 rows, so scroll.
+  const ListLayout L = computeListLayout(renderer, nSets, setSel, /*wantBlurb=*/true);
   const int pad = m.contentSidePadding;
 
-  for (int i = 0; i < nSets; i++) {
-    const int rowTop = top + i * rowH;
+  for (int k = 0; k < L.rowsPerPage; k++) {
+    const int i = L.firstVisible + k;
+    if (i >= nSets) break;
     const bool sel = (i == setSel);
-    if (sel) renderer.fillRect(pad - 6, rowTop, pageW - (pad - 6) * 2, boxH, true);
-    renderer.drawText(ROW_FONT, pad + 4, rowTop + 8, setNames[i], !sel);
+    if (sel) renderer.fillRect(pad - 6, L.rowTop(k), pageW - (pad - 6) * 2, L.boxH, true);
+    renderer.drawText(L.titleFont, pad + 4, L.nameTop(k), setNames[i], !sel);
 
-    const uint16_t a = setStarts[i], b = setEnd((uint8_t)i);
-    char sub[48];
-    snprintf(sub, sizeof(sub), "%u of %u solved", (unsigned)countSolved(a, b), (unsigned)(b - a));
-    renderer.drawText(SMALL, pad + 4, rowTop + 8 + lineH + 2, sub, !sel);
+    if (L.withBlurb) {
+      const uint16_t a = setStarts[i], b = setEnd((uint8_t)i);
+      char sub[48];
+      snprintf(sub, sizeof(sub), "%u of %u solved", (unsigned)countSolved(a, b), (unsigned)(b - a));
+      renderer.drawText(L.subFont, pad + 4, L.blurbTop(k), sub, !sel);
+    }
+  }
+
+  if (L.scrolls(nSets)) {
+    char pos[24];
+    snprintf(pos, sizeof(pos), "%d of %d", setSel + 1, nSets);
+    renderer.drawCenteredText(L.subFont, L.bottom + 4, pos);
   }
 
   const auto labels = mappedInput.mapLabels("Back", "Open", "Up", "Down");
