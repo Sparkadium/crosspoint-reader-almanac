@@ -33,15 +33,27 @@ int ClockActivity::daysInMonth(int y, int m) {
 
 void ClockActivity::onEnter() {
   Activity::onEnter();
+  TimeSource::begin();  // seeds the system clock from the RTC, on boards that have one
   sawConfirmPress_ = sawBackPress_ = false;
   lastTick_ = millis();
   requestUpdate();
 }
 
+// Sleep powers the MCU down completely, taking the system clock with it, so
+// write the epoch to NVS on the way out. Without this the next boot has nothing
+// to restore and reports "time not set" -- exactly the reported bug.
+void ClockActivity::onExit() {
+  Activity::onExit();
+}
+
 void ClockActivity::beginEdit() {
-  if (TimeSource::isSet())
+  if (TimeSource::isSet()) {
     TimeSource::localPartsMin(TimeSource::nowUtc(), y_, mo_, d_, hh_, mm_);
-  else {
+  } else if (TimeSource::lastKnownUtc() >= TimeSource::MIN_VALID) {
+    // Not the current time -- elapsed time is unrecoverable without a clock --
+    // but starting from what was last entered beats starting from 2026-01-01.
+    TimeSource::localPartsMin(TimeSource::lastKnownUtc(), y_, mo_, d_, hh_, mm_);
+  } else {
     y_ = 2026; mo_ = 1; d_ = 1; hh_ = 0; mm_ = 0;
   }
   field_ = F_YEAR;
@@ -184,10 +196,15 @@ void ClockActivity::render(RenderLock&&) {
   }
 
   if (!TimeSource::isSet()) {
+    const int lh = renderer.getLineHeight(SMALL);
     renderer.drawCenteredText(MID_FONT, pageH / 2 - 30, "Time not set");
-    renderer.drawCenteredText(SMALL, pageH / 2 + 4, "This device has no battery-backed clock.");
-    renderer.drawCenteredText(SMALL, pageH / 2 + 4 + renderer.getLineHeight(SMALL) + 4,
-                              "Press Set to enter the date and time.");
+    renderer.drawCenteredText(SMALL, pageH / 2 + 4,
+                              TimeSource::hasHardwareClock() ? "The clock chip has never been set."
+                                                             : "This device has no clock chip.");
+    renderer.drawCenteredText(SMALL, pageH / 2 + 4 + lh + 4, "Press Set to enter the date and time.");
+    if (!TimeSource::hasHardwareClock())
+      renderer.drawCenteredText(SMALL, pageH / 2 + 4 + (lh + 4) * 2,
+                                "Sleep powers the chip down, so it clears.");
   } else {
     int y, mo, d, hh, mm;
     const int offMin = TimeSource::localPartsMin(TimeSource::nowUtc(), y, mo, d, hh, mm);
@@ -207,9 +224,12 @@ void ClockActivity::render(RenderLock&&) {
     snprintf(tz, sizeof(tz), "%s%s", offBuf,
              Location::dstActive(y, mo, d, hh) ? "  (DST)" : "");
     renderer.drawCenteredText(SMALL, pageH / 2 + 10 + renderer.getLineHeight(MID_FONT) + 6, tz);
-    renderer.drawCenteredText(SMALL,
-                              pageH - m.buttonHintsHeight - m.verticalSpacing - renderer.getLineHeight(SMALL) - 4,
-                              "Lost on power-off; survives sleep.");
+    // Say only what is true of THIS board. Sleep cuts power to the MCU, so a
+    // device with no clock chip genuinely loses the time; one with an RTC keeps it.
+    renderer.drawCenteredText(
+        SMALL, pageH - m.buttonHintsHeight - m.verticalSpacing - renderer.getLineHeight(SMALL) - 4,
+        TimeSource::hasHardwareClock() ? "Kept by the clock chip, even when off."
+                                       : "Cleared when the device sleeps.");
   }
 
   if (!status_.empty()) renderer.drawCenteredText(SMALL, pageH / 2 + 90, status_.c_str());
