@@ -1,39 +1,94 @@
 #pragma once
 //
-// TimeSource.h — wall-clock time for the Almanac modules on the Xteink X4.
+// TimeSource.h — wall-clock time for the Almanac.
 //
-// WHY THIS EXISTS: the X4 has NO hardware RTC. CrossPoint's HalClock talks to a
-// DS3231 and returns early unless gpio.deviceIsX3(), which is why the stock
-// firmware hides all clock settings on this device. The Watchy had a PCF8563;
-// here there is nothing.
+// WHY THIS IS FIDDLY: these devices differ in whether they have a clock at all.
 //
-// So we drive the ESP32's own system clock with settimeofday(). That clock is
-// maintained by the RTC timer across deep sleep, so the time survives sleeping
-// and waking — but it is lost on a full power-off or battery death, exactly the
-// same tradeoff as a PCF8563 with no backup cell. The Clock module lets the
-// user re-set it; everything else reads it.
+//   X3      DS3231 at 0x68, battery-backed. Keeps time with the device off.
+//   Sticky  PCF8563 at 0x51. Same.
+//   X4      no RTC chip. BoardConfig gives it rtcAddr == 0.
 //
-// All epochs are UTC. Local civil time is derived from Location (lat/lon, a
-// standard-time UTC offset in minutes, and a DST rule) -- NOT from a hardcoded
-// timezone. Offsets are handled in MINUTES so that :30 and :45 zones work.
+// On a board WITH an RTC, that chip is the source of truth and the time survives
+// everything, including a flat battery.
 //
+// On a board WITHOUT one, the only clock is the ESP32's system clock, and on
+// these devices that survives nothing: HalPowerManager::startDeepSleep() pulls
+// GPIO13 low, which opens the battery latch MOSFET and powers the MCU down
+// completely -- RTC domain included. Its own comment says so. Waking is a cold
+// boot. Elapsed time cannot be recovered without a clock, so we do not pretend
+// to: the time reads as unset, and the Clock module pre-fills its editor with
+// whatever the user last entered, so re-setting it is quick.
+//
+// The freeink Rtc library drives both chips, reports present() == false on
+// boards without one, and returns false from now() when the oscillator has
+// stopped (low voltage, or never set) -- so one code path serves every device.
+//
+// Everything here is UTC. Local civil time comes from Location.
+//
+// Requires in platformio.ini:  Rtc=symlink://freeink-sdk/libs/hardware/Rtc
+//
+#include <Preferences.h>
+#include <Rtc.h>
+
 #include <ctime>
 #include <sys/time.h>
 
-#include "Location.h"
+#include "Location.h"  // also pulls in sky_math.h for sky_dowSakamoto
 
 class TimeSource {
  public:
-  // Epoch of 2025-01-01; anything earlier means "never set this power cycle".
+  // Epoch of 2025-01-01; anything earlier means "not set".
   static constexpr time_t MIN_VALID = 1735689600;
+
+  // Call before reading the time. Idempotent and cheap. Seeds the system clock
+  // from the hardware RTC when the board has one.
+  static void begin() {
+    if (started()) return;
+    started() = true;
+
+    if (!rtc().begin()) return;  // no RTC on this board (e.g. the X4)
+
+    Rtc::DateTime dt;
+    if (!rtc().now(dt)) return;  // I2C error, or the oscillator stopped
+    if (dt.year < 2025) return;  // never set
+
+    setSystemClock(epochFromUtcParts(dt.year, dt.month, dt.day, dt.hour, dt.minute) + dt.second);
+  }
+
+  // True when the board keeps time in hardware, so it survives power-off.
+  static bool hasHardwareClock() { return rtc().present(); }
 
   static bool isSet() { return time(nullptr) >= MIN_VALID; }
   static time_t nowUtc() { return time(nullptr); }
 
+  // Sets the system clock and the hardware RTC (if any), and remembers the value
+  // so a clockless board can pre-fill the editor after a cold boot.
   static void setUtc(time_t t) {
-    timeval tv{};
-    tv.tv_sec = t;
-    settimeofday(&tv, nullptr);
+    setSystemClock(t);
+    rememberUtc(t);
+    if (!rtc().present()) return;
+
+    int y, mo, d, hh, mm;
+    utcParts(t, y, mo, d, hh, mm);
+    Rtc::DateTime dt;
+    dt.year = (uint16_t)y;
+    dt.month = (uint8_t)mo;
+    dt.day = (uint8_t)d;
+    dt.hour = (uint8_t)hh;
+    dt.minute = (uint8_t)mm;
+    dt.second = (uint8_t)(((t % 60) + 60) % 60);
+    dt.weekday = (uint8_t)sky_dowSakamoto(y, mo, d);  // 0 = Sunday, as Rtc expects
+    rtc().set(dt);
+  }
+
+  // What the user last entered, or 0. NOT the current time: elapsed time cannot
+  // be recovered without a clock. Only useful for pre-filling the editor.
+  static time_t lastKnownUtc() {
+    Preferences p;
+    p.begin("almanac", true);
+    const uint32_t v = p.getUInt("lastutc", 0);
+    p.end();
+    return (time_t)v;
   }
 
   // --- civil <-> epoch, without relying on timegm() (absent in some newlibs).
@@ -96,5 +151,26 @@ class TimeSource {
     Location::begin();
     const int off = Location::utcOffsetMinutes(y, mo, d, hh);
     return epochFromUtcParts(y, mo, d, hh, mm) - (long)off * 60L;
+  }
+
+ private:
+  static Rtc& rtc() {
+    static Rtc r;
+    return r;
+  }
+  static bool& started() {
+    static bool b = false;
+    return b;
+  }
+  static void setSystemClock(time_t t) {
+    timeval tv{};
+    tv.tv_sec = t;
+    settimeofday(&tv, nullptr);
+  }
+  static void rememberUtc(time_t t) {
+    Preferences p;
+    p.begin("almanac", false);
+    p.putUInt("lastutc", (uint32_t)t);
+    p.end();
   }
 };
