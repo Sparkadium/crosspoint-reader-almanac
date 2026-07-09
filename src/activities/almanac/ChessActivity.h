@@ -90,7 +90,8 @@ class ChessActivity final : public Activity {
   void openMenu();
   void runMenuItem(int item);
   void openNumberEntry();
-  void blitSprite(int x, int y, const uint32_t* mask, int scale) const;
+  void blitSprite(int x, int y, const uint32_t* mask, int scale) const;   // 20px legacy set
+  void blitMask40(int x, int y, const uint64_t* mask, bool state) const;  // 40px native set
   void drawBoard();
   void drawMenu();
   void drawSetMenu();
