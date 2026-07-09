@@ -49,6 +49,7 @@ constexpr bool WHITE = false;
 void SkyActivity::onEnter() {
   Activity::onEnter();
   Location::begin();
+  TimeSource::begin();  // seeds the system clock from the RTC, on boards that have one
   lat_ = Location::get().lat;
   lon_ = Location::get().lon;
   timeSet_ = TimeSource::isSet();
@@ -56,6 +57,10 @@ void SkyActivity::onEnter() {
   offsetMin_ = 0;
   sawBackPress_ = sawConfirmPress_ = false;
   requestUpdate();
+}
+
+void SkyActivity::onExit() {
+  Activity::onExit();
 }
 
 bool SkyActivity::project(double raDeg, double decDeg, double jd, int& px, int& py) const {
@@ -103,8 +108,11 @@ void SkyActivity::render(RenderLock&&) {
   if (!timeSet_) {
     renderer.drawCenteredText(HEAD_FONT, pageH / 2 - 20, "Time not set");
     renderer.drawCenteredText(SMALL, pageH / 2 + 10, "Open Clock to set the date and time");
-    renderer.drawCenteredText(SMALL, pageH / 2 + 10 + renderer.getLineHeight(SMALL) + 4,
-                              "Set your coordinates in Almanac > Location");
+    const int l2 = pageH / 2 + 10 + renderer.getLineHeight(SMALL) + 4;
+    renderer.drawCenteredText(SMALL, l2, "Set your coordinates in Almanac > Location");
+    if (!TimeSource::hasHardwareClock())
+      renderer.drawCenteredText(SMALL, l2 + renderer.getLineHeight(SMALL) + 4,
+                                "This device has no clock chip; sleep clears the time.");
     GUI.drawButtonHints(renderer, "Back", "", "", "");
     renderer.displayBuffer();
     return;
@@ -146,7 +154,7 @@ void SkyActivity::render(RenderLock&&) {
   // ---- header line: date, time, dst marker ---------------------------------
   char off[16];
   Location::offsetLabel(off, sizeof(off), offMin);
-  char hdr[64];
+  char hdr[80];
   snprintf(hdr, sizeof(hdr), "%s %d  %02d:%02d  %s%s", monName[mo - 1], d, hh, mm, off,
            offsetMin_ ? "  *" : "");
   renderer.drawCenteredText(SMALL, headerLineY, hdr);
