@@ -17,11 +17,12 @@
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "activities/almanac/AlmanacActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
 int HomeActivity::getMenuItemCount() const {
-  int count = 4;  // File Browser, Recents, File transfer, Settings
+  int count = 5;  // File Browser, Recents, File transfer, Settings, Almanac
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -200,6 +201,9 @@ void HomeActivity::loop() {
         case HomeMenuItem::SETTINGS_MENU:
           onSettingsOpen();
           break;
+        case HomeMenuItem::ALMANAC:
+          onAlmanacOpen();
+          break;
         default:
           break;
       }
@@ -232,8 +236,8 @@ void HomeActivity::render(RenderLock&&) {
 
   // Build menu items dynamically
   std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_MENU_RECENT_BOOKS), tr(STR_FILE_TRANSFER),
-                                        tr(STR_SETTINGS_TITLE)};
-  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Settings};
+                                        tr(STR_SETTINGS_TITLE), "Almanac"};
+  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Settings, Library};
 
   if (hasOpdsServers) {
     menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
@@ -281,3 +285,7 @@ void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
+
+void HomeActivity::onAlmanacOpen() {
+  startActivityForResult(std::make_unique<AlmanacActivity>(renderer, mappedInput), [](const ActivityResult&) {});
+}

@@ -23,3 +23,9 @@ lib/EpdFont/scripts/output/
 # (worktrees, scheduled-task locks, settings.local, scout CLEANUP.md) out.
 .claude/*
 !.claude/skills/
+
+# Almanac data (rebuildable; see build scripts)
+*.cdb
+problems.bin
+chess*.bin
+platformio.local.ini
