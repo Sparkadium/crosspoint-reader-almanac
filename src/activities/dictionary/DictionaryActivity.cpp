@@ -1,3 +1,8 @@
+// Arduino.h must come first: on the ESP32 it declares placement new
+// (operator new(size_t, void*)), which std::function needs. ButtonNavigator
+// takes std::function callbacks, so every file using it must see this first.
+#include <Arduino.h>
+
 #include "DictionaryActivity.h"
 
 #include <GfxRenderer.h>
@@ -6,14 +11,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
+#include <new>
 #include <variant>
 
 #include "MappedInputManager.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
-
 namespace {
 constexpr int BODY_FONT = NOTOSERIF_16_FONT_ID;
 constexpr int HEAD_FONT = UI_12_FONT_ID;
@@ -39,38 +45,37 @@ bool WcdbReader::begin(const char* path) {
   uint8_t header[12];
   if (file_.read(header, sizeof(header)) != (int)sizeof(header)) return false;
   if (memcmp(header, "WCDB", 4) != 0) return false;
-  const uint32_t blocks = rd32(header + 4);
+  blocks_ = rd32(header + 4);
   totalEntries_ = rd32(header + 8);
-  if (blocks == 0 || blocks > 65535) return false;
+  if (blocks_ == 0) return false;
 
-  index_.resize(blocks);
-  uint32_t maxRaw = 0, maxComp = 0;
-  for (uint32_t i = 0; i < blocks; i++) {
-    uint8_t rec[44];
-    if (file_.read(rec, sizeof(rec)) != (int)sizeof(rec)) return false;
-    BlockIdx& b = index_[i];
-    memcpy(b.firstWord, rec, 32);
-    b.firstWord[31] = '\0';  // writer caps the word at 31 bytes + NUL padding
-    b.offset = rd32(rec + 32);
-    b.compSize = rd32(rec + 36);
-    b.rawSize = rd32(rec + 40);
-    maxRaw = std::max(maxRaw, b.rawSize);
-    maxComp = std::max(maxComp, b.compSize);
-  }
+  // Sanity: the index must actually fit inside the file.
+  const size_t need = INDEX_OFFSET + (size_t)blocks_ * RECORD_SIZE;
+  if (file_.size() < need) return false;
 
-  // Size the working buffers to the file's actual worst case (the writer
-  // guarantees rawSize <= BLOCK_SIZE, historically 32768).
-  decBuf_.resize(maxRaw);
-  compBuf_.resize(maxComp);
-
+  // The index stays on the card. Buffers start empty and grow to the largest
+  // block we actually touch (the writer guarantees rawSize <= BLOCK_SIZE).
   curBlk_ = curLine_ = 0;
   ready_ = true;
   return true;
 }
 
+// One 44-byte record, read in place. Called ~12 times per binary search.
+bool WcdbReader::readRecord(uint32_t idx, BlockIdx& out) {
+  if (idx >= blocks_) return false;
+  if (!file_.seek(INDEX_OFFSET + (size_t)idx * RECORD_SIZE)) return false;
+  uint8_t rec[RECORD_SIZE];
+  if (file_.read(rec, RECORD_SIZE) != (int)RECORD_SIZE) return false;
+  memcpy(out.firstWord, rec, 32);
+  out.firstWord[31] = '\0';  // the writer caps the word at 31 bytes + NUL padding
+  out.offset = rd32(rec + 32);
+  out.compSize = rd32(rec + 36);
+  out.rawSize = rd32(rec + 40);
+  return true;
+}
+
 void WcdbReader::end() {
   if (file_) file_.close();
-  index_.clear();
   decBuf_.clear();
   compBuf_.clear();
   decBuf_.shrink_to_fit();
@@ -78,21 +83,28 @@ void WcdbReader::end() {
   decSize_ = 0;
   cachedBlk_ = -1;
   curBlk_ = curLine_ = 0;
+  blocks_ = 0;
   totalEntries_ = 0;
   ready_ = false;
 }
 
 bool WcdbReader::decompressBlock(int idx) {
   if (idx == cachedBlk_) return true;
-  if (idx < 0 || idx >= (int)index_.size()) return false;
-  const BlockIdx& b = index_[idx];
+  if (idx < 0 || (uint32_t)idx >= blocks_) return false;
+
+  BlockIdx b;
+  if (!readRecord((uint32_t)idx, b)) return false;
+  if (b.rawSize == 0 || b.compSize == 0) return false;
+
+  if (compBuf_.size() < b.compSize) compBuf_.resize(b.compSize);
+  if (decBuf_.size() < b.rawSize) decBuf_.resize(b.rawSize);
 
   if (!file_.seek(b.offset)) return false;
   if (file_.read(compBuf_.data(), b.compSize) != (int)b.compSize) return false;
 
   // Raw DEFLATE (wbits -15): no zlib header, so do NOT call skipZlibHeader().
   InflateReader inf;
-  if (!inf.init(false)) return false;  // one-shot: whole block in memory
+  if (!inf.init(false)) return false;  // one-shot: the whole block is in memory
   inf.setSource(compBuf_.data(), b.compSize);
   if (!inf.read(decBuf_.data(), b.rawSize)) return false;
 
@@ -101,12 +113,15 @@ bool WcdbReader::decompressBlock(int idx) {
   return true;
 }
 
-int WcdbReader::findBlock(const std::string& query) const {
+// Binary search the on-card index. Same result as the RAM version; ~12 seeks.
+int WcdbReader::findBlock(const std::string& query) {
   const std::string q = lower(query);
-  int lo = 0, hi = (int)index_.size() - 1, result = 0;
+  int lo = 0, hi = (int)blocks_ - 1, result = 0;
+  BlockIdx b;
   while (lo <= hi) {
-    int mid = (lo + hi) / 2;
-    if (lower(index_[mid].firstWord) <= q) {
+    const int mid = (lo + hi) / 2;
+    if (!readRecord((uint32_t)mid, b)) break;
+    if (lower(b.firstWord) <= q) {
       result = mid;
       lo = mid + 1;
     } else {
@@ -170,7 +185,7 @@ WcdbReader::Entry WcdbReader::lookup(const std::string& query) {
   const int blk = findBlock(q);
 
   // The target may sit just past a block boundary; check neighbours, as on watch.
-  for (int b = std::max(0, blk - 1); b <= std::min(blk + 1, (int)index_.size() - 1); b++) {
+  for (int b = std::max(0, blk - 1); b <= std::min(blk + 1, (int)blocks_ - 1); b++) {
     if (!decompressBlock(b)) continue;
     uint32_t pos = 0;
     int line = 0;
@@ -204,7 +219,7 @@ std::vector<std::string> WcdbReader::prefixSearch(const std::string& prefix, int
   std::vector<std::string> out;
   if (!ready_ || prefix.empty()) return out;
   const std::string p = lower(prefix);
-  for (int b = findBlock(p); b < (int)index_.size() && (int)out.size() < maxResults; b++) {
+  for (int b = findBlock(p); b < (int)blocks_ && (int)out.size() < maxResults; b++) {
     if (!decompressBlock(b)) break;
     uint32_t pos = 0;
     while (pos < decSize_ && (int)out.size() < maxResults) {
@@ -236,7 +251,7 @@ WcdbReader::Entry WcdbReader::next() {
   int nb = curBlk_, nl = curLine_ + 1;
   if (nl >= linesInBlock()) {
     nl = 0;
-    if (++nb >= (int)index_.size()) nb = 0;
+    if (++nb >= (int)blocks_) nb = 0;
   }
   if (!decompressBlock(nb)) return Entry{};
   Entry e = entryInBlock(nl);
@@ -251,7 +266,7 @@ WcdbReader::Entry WcdbReader::prev() {
   if (!ready_) return Entry{};
   int nb = curBlk_, nl = curLine_ - 1;
   if (nl < 0) {
-    if (--nb < 0) nb = (int)index_.size() - 1;
+    if (--nb < 0) nb = (int)blocks_ - 1;
     if (!decompressBlock(nb)) return Entry{};
     nl = linesInBlock() - 1;
   }
@@ -265,8 +280,8 @@ WcdbReader::Entry WcdbReader::prev() {
 }
 
 WcdbReader::Entry WcdbReader::randomEntry() {
-  if (!ready_ || index_.empty()) return Entry{};
-  const int rb = (int)(esp_random() % index_.size());
+  if (!ready_ || blocks_ == 0) return Entry{};
+  const int rb = (int)(esp_random() % blocks_);
   if (!decompressBlock(rb)) return Entry{};
   const int lines = linesInBlock();
   if (lines <= 0) return Entry{};

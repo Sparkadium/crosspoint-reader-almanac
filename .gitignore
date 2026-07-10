@@ -29,3 +29,6 @@ lib/EpdFont/scripts/output/
 problems.bin
 chess*.bin
 platformio.local.ini
+
+!data/gazetteer.cdb
+!data/chess.bin

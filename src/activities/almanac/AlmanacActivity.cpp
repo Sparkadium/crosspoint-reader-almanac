@@ -22,14 +22,15 @@
 #include "SkyActivity.h"
 #include "TsumegoActivity.h"
 #include "activities/dictionary/DictionaryActivity.h"
+#include "ListLayout.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 namespace {
 constexpr int ROW_FONT = NOTOSERIF_16_FONT_ID;
 constexpr int SUB_FONT = SMALL_FONT_ID;
 
-const char* NAMES[] = {"Dictionary", "World Factbook", "Sky Chart", "Tsumego",
-                       "Chess",      "Clock",          "Location"};
+const char* NAMES[] = {"Dictionary", "World Factbook", "Wikipedia", "Sky Chart",
+                       "Tsumego",    "Chess",          "Clock",     "Location"};
 
 // Group digits: 69123 -> "69,123"
 std::string withCommas(uint32_t n) {
@@ -71,6 +72,9 @@ void AlmanacActivity::refreshBlurbs() {
   blurbs_[DICTIONARY] = words ? withCommas(words) + " words" : "dictionary.cdb not on SD card";
   blurbs_[FACTBOOK] = places ? withCommas(places) + " countries and territories"
                              : "gazetteer.cdb not on SD card";
+  const uint32_t articles = wcdbEntryCount("/wikipedia.cdb");
+  blurbs_[WIKIPEDIA] = articles ? withCommas(articles) + " Simple English articles"
+                                : "wikipedia.cdb not on SD card";
   blurbs_[SKY] = "stars, moon phase, sun times";
   blurbs_[TSUMEGO] = "Go life-and-death problems";  // count lives in problems.bin
   const uint32_t puzzles = chessPuzzleCount();
@@ -106,6 +110,14 @@ void AlmanacActivity::open(Item item) {
       status_.clear();
       startActivityForResult(
           std::make_unique<DictionaryActivity>(renderer, mappedInput, "/gazetteer.cdb", "World Factbook"),
+          onReturn);
+      break;
+    case WIKIPEDIA:
+      // Same WCDB engine, third data file. make_wikipedia.py reuses the writer
+      // from prepare_dict_fat.py, which is why no new module is needed.
+      status_.clear();
+      startActivityForResult(
+          std::make_unique<DictionaryActivity>(renderer, mappedInput, "/wikipedia.cdb", "Wikipedia"),
           onReturn);
       break;
     case SKY:
@@ -173,42 +185,33 @@ void AlmanacActivity::render(RenderLock&&) {
   renderer.clearScreen();
   const auto& m = UITheme::getInstance().getMetrics();
   const int pageW = renderer.getScreenWidth();
-  const int pageH = renderer.getScreenHeight();
 
   GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Almanac");
 
-  // NOTE: GfxRenderer::drawText takes the TOP of the text, not the baseline
-  // (it adds the ascender internally). Adding the ascender here as well pushed
-  // the blurb a full ascender down, out of the highlight rect -- which is why
-  // it disappeared when a row was selected.
-  const int nameLine = renderer.getLineHeight(ROW_FONT);
-  const int subLine = renderer.getLineHeight(SUB_FONT);
-
-  const int padTop = 8;      // inside the highlight, above the name
-  const int gap = 2;         // between name and blurb
-  const int padBot = 8;      // inside the highlight, below the blurb
-  const int boxH = padTop + nameLine + gap + subLine + padBot;
-  const int rowH = boxH + 8;  // 8px of air between rows
-
-  const int top = m.topPadding + m.headerHeight + m.verticalSpacing + 8;
+  // Shared with the chess and tsumego lists: the font is measured against the
+  // real space, and anything that still does not fit scrolls rather than being
+  // cropped off the bottom.
+  const ListLayout L = computeListLayout(renderer, ITEM_COUNT, selector_, /*wantBlurb=*/true);
   const int pad = m.contentSidePadding;
 
-  for (int i = 0; i < ITEM_COUNT; i++) {
-    const int rowTop = top + i * rowH;
+  for (int k = 0; k < L.rowsPerPage; k++) {
+    const int i = L.firstVisible + k;
+    if (i >= ITEM_COUNT) break;
     const bool sel = (i == selector_);
-    if (sel) renderer.fillRect(pad - 6, rowTop, pageW - (pad - 6) * 2, boxH, true);
+    if (sel) renderer.fillRect(pad - 6, L.rowTop(k), pageW - (pad - 6) * 2, L.boxH, true);
 
-    const int nameTop = rowTop + padTop;
-    const int subTop = nameTop + nameLine + gap;
-    renderer.drawText(ROW_FONT, pad + 4, nameTop, NAMES[i], !sel);
-    renderer.drawText(SUB_FONT, pad + 4, subTop, blurbs_[i].c_str(), !sel);
+    renderer.drawText(L.titleFont, pad + 4, L.nameTop(k), NAMES[i], !sel);
+    if (L.withBlurb)
+      renderer.drawText(L.subFont, pad + 4, L.blurbTop(k), blurbs_[i].c_str(), !sel);
   }
 
   if (!status_.empty())
-    renderer.drawCenteredText(SUB_FONT,
-                              pageH - m.buttonHintsHeight - m.verticalSpacing -
-                                  renderer.getLineHeight(SUB_FONT) - 4,
-                              status_.c_str());
+    renderer.drawCenteredText(L.subFont, L.bottom + 4, status_.c_str());
+  else if (L.scrolls(ITEM_COUNT)) {
+    char pos[24];
+    snprintf(pos, sizeof(pos), "%d of %d", selector_ + 1, ITEM_COUNT);
+    renderer.drawCenteredText(L.subFont, L.bottom + 4, pos);
+  }
 
   const auto labels = mappedInput.mapLabels("Home", "Open", "Up", "Down");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

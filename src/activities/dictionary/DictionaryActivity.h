@@ -21,6 +21,13 @@
 // ordinals, so prev/next walk lines and roll across block boundaries exactly
 // as WatchyDict's getNextEntry()/getPrevEntry() did.
 //
+// The block index is NOT held in RAM. It is sorted by firstWord and sits on the
+// SD card, so findBlock() binary-searches it in place: ~12 seeks of 44 bytes
+// instead of a resident vector. On the watch that vector was ~10KB and fine; a
+// Wikipedia corpus would need ~170KB of the X4's 327KB just to hold the index.
+// Reading it from the card removes the corpus-size ceiling altogether, and the
+// dictionary and gazetteer open faster as a side effect.
+//
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -45,7 +52,7 @@ class WcdbReader {
 
   bool ready() const { return ready_; }
   uint32_t entryCount() const { return totalEntries_; }
-  int blockCount() const { return (int)index_.size(); }
+  int blockCount() const { return (int)blocks_; }
 
   // Exact, case-insensitive lookup. Moves the cursor on success.
   Entry lookup(const std::string& query);
@@ -63,18 +70,24 @@ class WcdbReader {
     uint32_t offset, compSize, rawSize;
   };
 
-  int findBlock(const std::string& query) const;  // last block whose firstWord <= query
+  static constexpr uint32_t INDEX_OFFSET = 12;   // straight after the header
+  static constexpr uint32_t RECORD_SIZE = 44;
+
+  bool readRecord(uint32_t idx, BlockIdx& out);   // 44 bytes, straight off the card
+  int findBlock(const std::string& query);        // last block whose firstWord <= query
   bool decompressBlock(int idx);                  // into decBuf_, cached
   int linesInBlock() const;                       // lines in the cached block
   Entry entryInBlock(int lineIdx) const;          // raw (redirect NOT resolved)
   Entry resolve(Entry e);                         // follow a leading '>' redirect
 
   HalFile file_;
-  std::vector<BlockIdx> index_;
+  // Buffers grow to the largest block actually seen, so a corpus of small blocks
+  // never pays for a corpus of large ones.
   std::vector<uint8_t> decBuf_, compBuf_;
   uint32_t decSize_ = 0;  // valid bytes in decBuf_ for cachedBlk_
   int cachedBlk_ = -1;
   int curBlk_ = 0, curLine_ = 0;
+  uint32_t blocks_ = 0;
   uint32_t totalEntries_ = 0;
   bool ready_ = false;
 };

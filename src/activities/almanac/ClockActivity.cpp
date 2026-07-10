@@ -39,12 +39,6 @@ void ClockActivity::onEnter() {
   requestUpdate();
 }
 
-// Sleep powers the MCU down completely, taking the system clock with it, so
-// write the epoch to NVS on the way out. Without this the next boot has nothing
-// to restore and reports "time not set" -- exactly the reported bug.
-void ClockActivity::onExit() {
-  Activity::onExit();
-}
 
 void ClockActivity::beginEdit() {
   if (TimeSource::isSet()) {

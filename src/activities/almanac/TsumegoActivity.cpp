@@ -18,6 +18,7 @@
 
 #include "MappedInputManager.h"
 #include "activities/util/KeyboardEntryActivity.h"
+#include "ListLayout.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 namespace {
@@ -682,18 +683,14 @@ void TsumegoActivity::drawMenu() {
   const int pageW = renderer.getScreenWidth();
   GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Tsumego menu");
 
-  // drawText's y is the top of the text; do not add the ascender.
-  const int lineH = renderer.getLineHeight(ROW_FONT);
-  const int boxH = lineH + 16;
-  const int rowH = boxH + 8;
-  const int top = m.topPadding + m.headerHeight + m.verticalSpacing + 8;
+  const ListLayout L = computeListLayout(renderer, MENU_COUNT, menuSel, /*wantBlurb=*/false);
   const int pad = m.contentSidePadding;
 
-  for (int i = 0; i < MENU_COUNT; i++) {
-    const int rowTop = top + i * rowH;
+  for (int k = 0; k < L.rowsPerPage; k++) {
+    const int i = L.firstVisible + k;
     const bool sel = (i == menuSel);
-    if (sel) renderer.fillRect(pad - 6, rowTop, pageW - (pad - 6) * 2, boxH, true);
-    renderer.drawText(ROW_FONT, pad + 4, rowTop + 8, MENU_LABELS[i], !sel);
+    if (sel) renderer.fillRect(pad - 6, L.rowTop(k), pageW - (pad - 6) * 2, L.boxH, true);
+    renderer.drawText(L.titleFont, pad + 4, L.nameTop(k), MENU_LABELS[i], !sel);
   }
 
   const auto labels = mappedInput.mapLabels("Close", "Choose", "Up", "Down");
@@ -706,23 +703,29 @@ void TsumegoActivity::drawSetMenu() {
   const int pageW = renderer.getScreenWidth();
   GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Problem sets");
 
-  const int lineH = renderer.getLineHeight(ROW_FONT);
-  const int subH = renderer.getLineHeight(SMALL);
-  const int boxH = 8 + lineH + 2 + subH + 8;
-  const int rowH = boxH + 8;
-  const int top = m.topPadding + m.headerHeight + m.verticalSpacing + 8;
+  // A TSU2 file may carry up to 16 sets; scroll rather than crop.
+  const ListLayout L = computeListLayout(renderer, nSets, setSel, /*wantBlurb=*/true);
   const int pad = m.contentSidePadding;
 
-  for (int i = 0; i < nSets; i++) {
-    const int rowTop = top + i * rowH;
+  for (int k = 0; k < L.rowsPerPage; k++) {
+    const int i = L.firstVisible + k;
+    if (i >= nSets) break;
     const bool sel = (i == setSel);
-    if (sel) renderer.fillRect(pad - 6, rowTop, pageW - (pad - 6) * 2, boxH, true);
-    renderer.drawText(ROW_FONT, pad + 4, rowTop + 8, setNames[i], !sel);
+    if (sel) renderer.fillRect(pad - 6, L.rowTop(k), pageW - (pad - 6) * 2, L.boxH, true);
+    renderer.drawText(L.titleFont, pad + 4, L.nameTop(k), setNames[i], !sel);
 
-    const uint16_t a = setStarts[i], b = setEnd((uint8_t)i);
-    char sub[48];
-    snprintf(sub, sizeof(sub), "%u of %u solved", (unsigned)countSolved(a, b), (unsigned)(b - a));
-    renderer.drawText(SMALL, pad + 4, rowTop + 8 + lineH + 2, sub, !sel);
+    if (L.withBlurb) {
+      const uint16_t a = setStarts[i], b = setEnd((uint8_t)i);
+      char sub[48];
+      snprintf(sub, sizeof(sub), "%u of %u solved", (unsigned)countSolved(a, b), (unsigned)(b - a));
+      renderer.drawText(L.subFont, pad + 4, L.blurbTop(k), sub, !sel);
+    }
+  }
+
+  if (L.scrolls(nSets)) {
+    char pos[24];
+    snprintf(pos, sizeof(pos), "%d of %d", setSel + 1, nSets);
+    renderer.drawCenteredText(L.subFont, L.bottom + 4, pos);
   }
 
   const auto labels = mappedInput.mapLabels("Back", "Open", "Up", "Down");

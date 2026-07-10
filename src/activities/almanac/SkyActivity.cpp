@@ -59,9 +59,6 @@ void SkyActivity::onEnter() {
   requestUpdate();
 }
 
-void SkyActivity::onExit() {
-  Activity::onExit();
-}
 
 bool SkyActivity::project(double raDeg, double decDeg, double jd, int& px, int& py) const {
   double alt, az;
