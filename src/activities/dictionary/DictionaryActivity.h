@@ -70,8 +70,18 @@ class WcdbReader {
     uint32_t offset, compSize, rawSize;
   };
 
-  static constexpr uint32_t INDEX_OFFSET = 12;   // straight after the header
+  static constexpr uint32_t INDEX_OFFSET = 12;  // straight after the header
   static constexpr uint32_t RECORD_SIZE = 44;
+
+  // The writers cap a raw block at BLOCK_SIZE. Deflate's worst case on
+  // incompressible input is raw + raw/16 + 64, so a compressed block can be
+  // slightly larger than a raw one. Both buffers are reserved ONCE to these
+  // ceilings: with -fno-exceptions a failed allocation calls abort(), and a
+  // vector that grows to a new size on every block would fragment the heap
+  // until one did. Sizes read off the card are validated against them too --
+  // never allocate a number that came from a file.
+  static constexpr uint32_t MAX_RAW = 32768;
+  static constexpr uint32_t MAX_COMP = MAX_RAW + MAX_RAW / 16 + 64;
 
   bool readRecord(uint32_t idx, BlockIdx& out);   // 44 bytes, straight off the card
   int findBlock(const std::string& query);        // last block whose firstWord <= query
@@ -109,7 +119,7 @@ class DictionaryActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
-  static constexpr uint16_t LONG_PRESS_MS = 500;  // hold Confirm = random word
+  static constexpr uint16_t LONG_PRESS_MS = 500;  // hold Confirm = random, hold Back = text size
 
   void setEntry(const WcdbReader::Entry& e);
   void openSearch();
@@ -130,4 +140,11 @@ class DictionaryActivity final : public Activity {
   bool confirmHeld_ = false;
   bool confirmLongHandled_ = false;
   bool sawBackPress_ = false;
+  bool backLongHandled_ = false;
+
+  // Body text size, cycled with a long press on Back and kept in NVS.
+  // 0 = 12pt, 1 = 14pt, 2 = 16pt (the old fixed size).
+  uint8_t fontStep_ = 0;
+  int bodyFont() const;
+  void cycleFont();
 };

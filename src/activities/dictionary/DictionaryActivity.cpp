@@ -7,6 +7,7 @@
 
 #include <GfxRenderer.h>
 #include <InflateReader.h>
+#include <Preferences.h>
 #include <esp_random.h>
 
 #include <algorithm>
@@ -21,7 +22,11 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 namespace {
-constexpr int BODY_FONT = NOTOSERIF_16_FONT_ID;
+// Body text can be 12, 14 or 16pt. Wikipedia leads and Factbook entries are long
+// enough that 16pt cost real paging; 12pt is the default now. All three are
+// registered in main.cpp -- an unregistered font id draws nothing at all.
+constexpr int BODY_FONTS[] = {NOTOSERIF_12_FONT_ID, NOTOSERIF_14_FONT_ID, NOTOSERIF_16_FONT_ID};
+constexpr int FONT_STEPS = 3;
 constexpr int HEAD_FONT = UI_12_FONT_ID;
 
 std::string lower(std::string s) {
@@ -53,8 +58,16 @@ bool WcdbReader::begin(const char* path) {
   const size_t need = INDEX_OFFSET + (size_t)blocks_ * RECORD_SIZE;
   if (file_.size() < need) return false;
 
-  // The index stays on the card. Buffers start empty and grow to the largest
-  // block we actually touch (the writer guarantees rawSize <= BLOCK_SIZE).
+  // The index stays on the card. Reserve the working buffers once, to their
+  // fixed ceilings: resize() inside an existing capacity never reallocates, so
+  // jumping between blocks of different sizes cannot fragment the heap.
+  decBuf_.reserve(MAX_RAW);
+  compBuf_.reserve(MAX_COMP);
+  if (decBuf_.capacity() < MAX_RAW || compBuf_.capacity() < MAX_COMP) {
+    end();  // not enough contiguous heap; fail cleanly rather than abort() later
+    return false;
+  }
+
   curBlk_ = curLine_ = 0;
   ready_ = true;
   return true;
@@ -94,10 +107,16 @@ bool WcdbReader::decompressBlock(int idx) {
 
   BlockIdx b;
   if (!readRecord((uint32_t)idx, b)) return false;
-  if (b.rawSize == 0 || b.compSize == 0) return false;
 
-  if (compBuf_.size() < b.compSize) compBuf_.resize(b.compSize);
-  if (decBuf_.size() < b.rawSize) decBuf_.resize(b.rawSize);
+  // These three numbers came off an SD card. Validate them before they are used
+  // to size an allocation or a read: a corrupt record must fail this block, not
+  // take the firmware down with it.
+  if (b.rawSize == 0 || b.rawSize > MAX_RAW) return false;
+  if (b.compSize == 0 || b.compSize > MAX_COMP) return false;
+  if ((uint64_t)b.offset + b.compSize > (uint64_t)file_.size()) return false;
+
+  compBuf_.resize(b.compSize);  // within the reserved capacity: no reallocation
+  decBuf_.resize(b.rawSize);
 
   if (!file_.seek(b.offset)) return false;
   if (file_.read(compBuf_.data(), b.compSize) != (int)b.compSize) return false;
@@ -302,8 +321,16 @@ void DictionaryActivity::onEnter() {
   Activity::onEnter();
   ButtonNavigator::setMappedInputManager(mappedInput);
 
+  {
+    Preferences p;
+    p.begin("almanac", true);
+    fontStep_ = p.getUChar("dictfont", 0);  // 12pt by default
+    p.end();
+    if (fontStep_ >= FONT_STEPS) fontStep_ = 0;
+  }
+
   loadError_ = !dict_.begin(cdbPath_);
-  confirmHeld_ = confirmLongHandled_ = sawBackPress_ = false;
+  confirmHeld_ = confirmLongHandled_ = sawBackPress_ = backLongHandled_ = false;
   if (!loadError_) setEntry(dict_.currentEntry());
   requestUpdate();
 }
@@ -312,6 +339,20 @@ void DictionaryActivity::onExit() {
   Activity::onExit();
   dict_.end();
   wrapped_.clear();
+}
+
+int DictionaryActivity::bodyFont() const {
+  return BODY_FONTS[fontStep_ < FONT_STEPS ? fontStep_ : 0];
+}
+
+void DictionaryActivity::cycleFont() {
+  fontStep_ = (uint8_t)((fontStep_ + 1) % FONT_STEPS);
+  Preferences p;
+  p.begin("almanac", false);
+  p.putUChar("dictfont", fontStep_);
+  p.end();
+  page_ = 0;
+  wrapped_.clear();  // re-wrap at the new size
 }
 
 void DictionaryActivity::setEntry(const WcdbReader::Entry& e) {
@@ -324,14 +365,14 @@ int DictionaryActivity::bodyLinesPerPage() const {
   const auto& m = UITheme::getInstance().getMetrics();
   const int top = m.topPadding + m.headerHeight + m.verticalSpacing;
   const int usable = renderer.getScreenHeight() - top - m.buttonHintsHeight - m.verticalSpacing;
-  return std::max(1, usable / renderer.getLineHeight(BODY_FONT));
+  return std::max(1, usable / renderer.getLineHeight(bodyFont()));
 }
 
 void DictionaryActivity::openSearch() {
   auto handler = [this](const ActivityResult& res) {
     // The keyboard consumed the press; its trailing release reaches us without
     // a matching press and is discarded by the press/release matching in loop().
-    confirmHeld_ = confirmLongHandled_ = sawBackPress_ = false;
+    confirmHeld_ = confirmLongHandled_ = sawBackPress_ = backLongHandled_ = false;
     if (res.isCancelled) {
       requestUpdate(true);
       return;
@@ -371,10 +412,22 @@ void DictionaryActivity::loop() {
     return;
   }
 
-  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) sawBackPress_ = true;
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+    sawBackPress_ = true;
+    backLongHandled_ = false;
+  }
+  if (sawBackPress_ && !backLongHandled_ && mappedInput.isPressed(MappedInputManager::Button::Back) &&
+      mappedInput.getHeldTime() > LONG_PRESS_MS) {
+    backLongHandled_ = true;  // hold Back = smaller/larger text
+    cycleFont();
+    requestUpdate();
+    return;
+  }
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     if (!sawBackPress_) return;  // leftover from the keyboard
-    sawBackPress_ = false;
+    const bool wasLong = backLongHandled_;
+    sawBackPress_ = backLongHandled_ = false;
+    if (wasLong) return;  // the hold already changed the size
     finish();
     return;
   }
@@ -467,17 +520,17 @@ void DictionaryActivity::render(RenderLock&&) {
   const int contentTop = m.topPadding + m.headerHeight + m.verticalSpacing;
   const int sidePad = m.contentSidePadding;
   const int bodyW = pageW - sidePad * 2;
-  const int lh = renderer.getLineHeight(BODY_FONT);
+  const int lh = renderer.getLineHeight(bodyFont());
   const int perPage = bodyLinesPerPage();
 
   if (wrapped_.empty() && entry_.found)
-    wrapped_ = renderer.wrappedText(BODY_FONT, entry_.definition.c_str(), bodyW, 4096);
+    wrapped_ = renderer.wrappedText(bodyFont(), entry_.definition.c_str(), bodyW, 4096);
 
   // drawText's y is the TOP of the line (it adds the ascender internally).
   int y = contentTop;
   const int start = page_ * perPage;
   for (int i = start; i < start + perPage && i < (int)wrapped_.size(); i++) {
-    renderer.drawText(BODY_FONT, sidePad, y, wrapped_[i].c_str());
+    renderer.drawText(bodyFont(), sidePad, y, wrapped_[i].c_str());
     y += lh;
   }
 
@@ -486,9 +539,12 @@ void DictionaryActivity::render(RenderLock&&) {
 
   // The long-press affordance has nowhere to live in the hint bar without
   // colliding with its neighbours, so state it once, quietly, on the left.
+  char foot[64];
+  snprintf(foot, sizeof(foot), "hold Search: random   hold Home: text size %dpt",
+           fontStep_ == 0 ? 12 : (fontStep_ == 1 ? 14 : 16));
   renderer.drawText(SMALL_FONT_ID, sidePad,
                     pageH - m.buttonHintsHeight - m.verticalSpacing - renderer.getLineHeight(SMALL_FONT_ID),
-                    "hold Search = random word");
+                    foot);
 
   const int totalPages = std::max(1, ((int)wrapped_.size() + perPage - 1) / perPage);
   if (totalPages > 1) {
