@@ -107,7 +107,10 @@ void SkyActivity::render(RenderLock&&) {
     renderer.drawCenteredText(SMALL, pageH / 2 + 10, "Open Clock to set the date and time");
     const int l2 = pageH / 2 + 10 + renderer.getLineHeight(SMALL) + 4;
     renderer.drawCenteredText(SMALL, l2, "Set your coordinates in Almanac > Location");
-    if (!TimeSource::hasHardwareClock())
+    if (TimeSource::rtcStatus() == TimeSource::Clock::NoLibrary)
+      renderer.drawCenteredText(SMALL, l2 + renderer.getLineHeight(SMALL) + 4,
+                                "Built without RTC support; on X3 add the Rtc flag.");
+    else if (TimeSource::rtcStatus() == TimeSource::Clock::NoChip)
       renderer.drawCenteredText(SMALL, l2 + renderer.getLineHeight(SMALL) + 4,
                                 "This device has no clock chip; sleep clears the time.");
     GUI.drawButtonHints(renderer, "Back", "", "", "");
