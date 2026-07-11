@@ -2,42 +2,36 @@
 //
 // TimeSource.h — wall-clock time for the Almanac.
 //
-// WHY THIS IS FIDDLY: these devices differ in whether they have a clock at all.
-//
 //   X3      DS3231 at 0x68, battery-backed. Keeps time with the device off.
 //   Sticky  PCF8563 at 0x51. Same.
 //   X4      no RTC chip. BoardConfig gives it rtcAddr == 0.
 //
 // On a board WITH an RTC, that chip is the source of truth and the time survives
-// everything, including a flat battery.
+// power-off. Without one, the ESP32 system clock is all there is, and on these
+// devices deep sleep powers the MCU down completely (HalPowerManager pulls the
+// battery-latch MOSFET), so the time is lost on sleep. We do not pretend it
+// isn't: the time reads as unset and the editor pre-fills from the last value.
 //
-// On a board WITHOUT one, the only clock is the ESP32's system clock, and on
-// these devices that survives nothing: HalPowerManager::startDeepSleep() pulls
-// GPIO13 low, which opens the battery latch MOSFET and powers the MCU down
-// completely -- RTC domain included. Its own comment says so. Waking is a cold
-// boot. Elapsed time cannot be recovered without a clock, so we do not pretend
-// to: the time reads as unset, and the Clock module pre-fills its editor with
-// whatever the user last entered, so re-setting it is quick.
+// TWO SUBTLETIES THAT CAUSED AN X3 TO BEHAVE LIKE AN X4:
 //
-// The freeink Rtc library drives both chips, reports present() == false on
-// boards without one, and returns false from now() when the oscillator has
-// stopped (low voltage, or never set) -- so one code path serves every device.
+//   1. On the dual X3/X4 ESP32-C3 binary, BoardConfig::ACTIVE boots as X4 and is
+//      swapped to X3 at RUNTIME by setDisplayX3() during display init. So the
+//      RTC address is only correct AFTER that. We therefore (re)try rtc().begin()
+//      lazily on every access until it succeeds, rather than probing once at a
+//      fixed early moment and latching the result.
 //
-// Everything here is UTC. Local civil time comes from Location.
+//   2. The library is optional at compile time. If the build does not define
+//      ALMANAC_USE_FREEINK_RTC (and add the Rtc lib to lib_deps), the X3 has no
+//      RTC support and silently behaves like an X4. rtcStatus() reports which
+//      case you are in, so the Clock screen can say so instead of leaving you to
+//      guess.
 //
-// Requires in platformio.ini:  Rtc=symlink://freeink-sdk/libs/hardware/Rtc
+// platformio.ini, to enable the hardware clock on an X3:
+//     lib_deps  += Rtc=symlink://freeink-sdk/libs/hardware/Rtc
+//     build_flags+= -DALMANAC_USE_FREEINK_RTC=1
 //
 #include <Preferences.h>
 
-// The freeink Rtc library is an optional dependency. Add this to platformio.ini
-// to get a real hardware clock on boards that have one (X3, Sticky):
-//
-//     Rtc=symlink://freeink-sdk/libs/hardware/Rtc
-//
-// Without it everything still builds; the board simply reports no clock, which
-// is already the truth on the X4.
-// Opt in explicitly rather than sniffing for a header named Rtc.h -- that name
-// is not unique on the include path.
 #ifdef ALMANAC_USE_FREEINK_RTC
 #include <Rtc.h>
 #define ALMANAC_HAS_RTC_LIB 1
@@ -50,45 +44,48 @@
 
 class TimeSource {
  public:
-  // Epoch of 2025-01-01; anything earlier means "not set".
-  static constexpr time_t MIN_VALID = 1735689600;
+  static constexpr time_t MIN_VALID = 1735689600;  // 2025-01-01
 
-  // Call before reading the time. Idempotent and cheap. Seeds the system clock
-  // from the hardware RTC when the board has one.
-  static void begin() {
-    if (started()) return;
-    started() = true;
-#ifdef ALMANAC_HAS_RTC_LIB
-    if (!rtc().begin()) return;  // no RTC on this board (e.g. the X4)
+  enum class Clock : uint8_t { NoLibrary, NoChip, Ready };
 
-    Rtc::DateTime dt;
-    if (!rtc().now(dt)) return;  // I2C error, or the oscillator stopped
-    if (dt.year < 2025) return;  // never set
-
-    setSystemClock(epochFromUtcParts(dt.year, dt.month, dt.day, dt.hour, dt.minute) + dt.second);
+  // Reports what kind of clock this build+board actually has. Drives the honest
+  // on-screen message, and re-probes the RTC each call so it becomes Ready as
+  // soon as the runtime board swap has happened.
+  static Clock rtcStatus() {
+#ifndef ALMANAC_HAS_RTC_LIB
+    return Clock::NoLibrary;   // built without the Rtc library
+#else
+    return ensureRtc() ? Clock::Ready : Clock::NoChip;
 #endif
   }
 
-  // True when the board keeps time in hardware, so it survives power-off.
-  static bool hasHardwareClock() {
+  static bool hasHardwareClock() { return rtcStatus() == Clock::Ready; }
+
+  // Seed the system clock from the RTC. Safe to call repeatedly; cheap once done.
+  static void begin() {
 #ifdef ALMANAC_HAS_RTC_LIB
-    return rtc().present();
-#else
-    return false;
+    if (systemSeeded()) return;
+    if (!ensureRtc()) return;  // board not swapped yet, or genuinely no chip
+
+    Rtc::DateTime dt;
+    if (!rtc().now(dt)) return;  // I2C error, or oscillator stopped
+    if (dt.year < 2025) { systemSeeded() = true; return; }  // chip present but never set
+
+    setSystemClock(epochFromUtcParts(dt.year, dt.month, dt.day, dt.hour, dt.minute) + dt.second);
+    systemSeeded() = true;
 #endif
   }
 
   static bool isSet() { return time(nullptr) >= MIN_VALID; }
   static time_t nowUtc() { return time(nullptr); }
 
-  // Sets the system clock and the hardware RTC (if any), and remembers the value
-  // so a clockless board can pre-fill the editor after a cold boot.
   static void setUtc(time_t t) {
     setSystemClock(t);
     rememberUtc(t);
 #ifdef ALMANAC_HAS_RTC_LIB
-    if (!rtc().present()) return;
-
+    if (!ensureRtc()) return;  // <-- ensures begin() ran; the old code checked
+                               //     present() without it, so a first-run setUtc
+                               //     silently skipped the chip.
     int y, mo, d, hh, mm;
     utcParts(t, y, mo, d, hh, mm);
     Rtc::DateTime dt;
@@ -98,13 +95,12 @@ class TimeSource {
     dt.hour = (uint8_t)hh;
     dt.minute = (uint8_t)mm;
     dt.second = (uint8_t)(((t % 60) + 60) % 60);
-    dt.weekday = (uint8_t)sky_dowSakamoto(y, mo, d);  // 0 = Sunday, as Rtc expects
+    dt.weekday = (uint8_t)sky_dowSakamoto(y, mo, d);  // 0 = Sunday
     rtc().set(dt);
+    systemSeeded() = true;
 #endif
   }
 
-  // What the user last entered, or 0. NOT the current time: elapsed time cannot
-  // be recovered without a clock. Only useful for pre-filling the editor.
   static time_t lastKnownUtc() {
     Preferences p;
     p.begin("almanac", true);
@@ -113,8 +109,7 @@ class TimeSource {
     return (time_t)v;
   }
 
-  // --- civil <-> epoch, without relying on timegm() (absent in some newlibs).
-  // Howard Hinnant's days_from_civil; valid for any proleptic Gregorian date.
+  // --- civil <-> epoch (Howard Hinnant; no timegm dependency) --------------
   static long daysFromCivil(int y, int m, int d) {
     y -= m <= 2;
     const long era = (y >= 0 ? y : y - 399) / 400;
@@ -135,40 +130,27 @@ class TimeSource {
     m = (int)(mp + (mp < 10 ? 3 : -9));
     y = (int)(yr + (m <= 2));
   }
-
   static time_t epochFromUtcParts(int y, int mo, int d, int hh, int mm) {
     return daysFromCivil(y, mo, d) * 86400L + hh * 3600L + mm * 60L;
   }
   static void utcParts(time_t t, int& y, int& mo, int& d, int& hh, int& mm) {
-    long days = (long)(t / 86400);
-    long rem = (long)(t % 86400);
-    if (rem < 0) {
-      rem += 86400;
-      days -= 1;
-    }
+    long days = (long)(t / 86400), rem = (long)(t % 86400);
+    if (rem < 0) { rem += 86400; days -= 1; }
     civilFromDays(days, y, mo, d);
     hh = (int)(rem / 3600);
     mm = (int)((rem % 3600) / 60);
   }
 
-  // UTC epoch -> local civil parts. Returns the offset used, in MINUTES.
   static int localPartsMin(time_t utc, int& y, int& mo, int& d, int& hh, int& mm) {
     Location::begin();
     int uy, umo, ud, uh, um;
     utcParts(utc, uy, umo, ud, uh, um);
-    // Guess the offset from the UTC date, then refine against the local date:
-    // the DST boundary is defined in local time, so one pass is not enough.
     int off = Location::utcOffsetMinutes(uy, umo, ud, uh);
     utcParts(utc + (long)off * 60L, y, mo, d, hh, mm);
     const int off2 = Location::utcOffsetMinutes(y, mo, d, hh);
-    if (off2 != off) {
-      off = off2;
-      utcParts(utc + (long)off * 60L, y, mo, d, hh, mm);
-    }
+    if (off2 != off) { off = off2; utcParts(utc + (long)off * 60L, y, mo, d, hh, mm); }
     return off;
   }
-
-  // Local civil parts -> UTC epoch (local = utc + off  =>  utc = local - off).
   static time_t epochFromLocalParts(int y, int mo, int d, int hh, int mm) {
     Location::begin();
     const int off = Location::utcOffsetMinutes(y, mo, d, hh);
@@ -177,24 +159,19 @@ class TimeSource {
 
  private:
 #ifdef ALMANAC_HAS_RTC_LIB
-  static Rtc& rtc() {
-    static Rtc r;
-    return r;
+  static Rtc& rtc() { static Rtc r; return r; }
+  // Try begin() until it takes. Cheap once begun_ is set inside the library;
+  // before that, retrying is what lets an X3 come good after the runtime swap.
+  static bool ensureRtc() {
+    static bool ok = false;
+    if (ok) return true;
+    ok = rtc().begin();
+    return ok;
   }
 #endif
-  static bool& started() {
-    static bool b = false;
-    return b;
-  }
-  static void setSystemClock(time_t t) {
-    timeval tv{};
-    tv.tv_sec = t;
-    settimeofday(&tv, nullptr);
-  }
+  static bool& systemSeeded() { static bool b = false; return b; }
+  static void setSystemClock(time_t t) { timeval tv{}; tv.tv_sec = t; settimeofday(&tv, nullptr); }
   static void rememberUtc(time_t t) {
-    Preferences p;
-    p.begin("almanac", false);
-    p.putUInt("lastutc", (uint32_t)t);
-    p.end();
+    Preferences p; p.begin("almanac", false); p.putUInt("lastutc", (uint32_t)t); p.end();
   }
 };
