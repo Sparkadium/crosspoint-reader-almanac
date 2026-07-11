@@ -192,13 +192,19 @@ void ClockActivity::render(RenderLock&&) {
   if (!TimeSource::isSet()) {
     const int lh = renderer.getLineHeight(SMALL);
     renderer.drawCenteredText(MID_FONT, pageH / 2 - 30, "Time not set");
-    renderer.drawCenteredText(SMALL, pageH / 2 + 4,
-                              TimeSource::hasHardwareClock() ? "The clock chip has never been set."
-                                                             : "This device has no clock chip.");
+    const char* l1; const char* l2;
+    switch (TimeSource::rtcStatus()) {
+      case TimeSource::Clock::Ready:
+        l1 = "The clock chip has never been set."; l2 = ""; break;
+      case TimeSource::Clock::NoChip:
+        l1 = "This device has no clock chip."; l2 = "Sleep clears the time."; break;
+      default:  // NoLibrary: an X3 lands here if the build lacks the RTC flag
+        l1 = "Built without RTC support."; l2 = "On X3, add the Rtc build flag."; break;
+    }
+    renderer.drawCenteredText(SMALL, pageH / 2 + 4, l1);
     renderer.drawCenteredText(SMALL, pageH / 2 + 4 + lh + 4, "Press Set to enter the date and time.");
-    if (!TimeSource::hasHardwareClock())
-      renderer.drawCenteredText(SMALL, pageH / 2 + 4 + (lh + 4) * 2,
-                                "Sleep powers the chip down, so it clears.");
+    if (l2[0])
+      renderer.drawCenteredText(SMALL, pageH / 2 + 4 + (lh + 4) * 2, l2);
   } else {
     int y, mo, d, hh, mm;
     const int offMin = TimeSource::localPartsMin(TimeSource::nowUtc(), y, mo, d, hh, mm);
@@ -220,10 +226,14 @@ void ClockActivity::render(RenderLock&&) {
     renderer.drawCenteredText(SMALL, pageH / 2 + 10 + renderer.getLineHeight(MID_FONT) + 6, tz);
     // Say only what is true of THIS board. Sleep cuts power to the MCU, so a
     // device with no clock chip genuinely loses the time; one with an RTC keeps it.
+    const char* foot;
+    switch (TimeSource::rtcStatus()) {
+      case TimeSource::Clock::Ready: foot = "Kept by the clock chip, even when off."; break;
+      case TimeSource::Clock::NoChip: foot = "Cleared when the device sleeps."; break;
+      default: foot = "No RTC support in this build."; break;
+    }
     renderer.drawCenteredText(
-        SMALL, pageH - m.buttonHintsHeight - m.verticalSpacing - renderer.getLineHeight(SMALL) - 4,
-        TimeSource::hasHardwareClock() ? "Kept by the clock chip, even when off."
-                                       : "Cleared when the device sleeps.");
+        SMALL, pageH - m.buttonHintsHeight - m.verticalSpacing - renderer.getLineHeight(SMALL) - 4, foot);
   }
 
   if (!status_.empty()) renderer.drawCenteredText(SMALL, pageH / 2 + 90, status_.c_str());
