@@ -23,7 +23,7 @@
 #include "fontIds.h"
 
 namespace {
-constexpr int BIG_FONT = NOTOSERIF_18_FONT_ID;
+constexpr int BIG_FONT = BITTER_18_FONT_ID;
 constexpr int SMALL = SMALL_FONT_ID;
 const char* LABEL[] = {"latitude", "longitude", "utc offset", "daylight saving"};
 const char* PROMPT[] = {"Latitude (e.g. 45.3475)", "Longitude, east positive (e.g. -75.7566)",

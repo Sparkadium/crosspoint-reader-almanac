@@ -26,7 +26,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 namespace {
-constexpr int ROW_FONT = NOTOSERIF_16_FONT_ID;
+constexpr int ROW_FONT = BITTER_16_FONT_ID;
 constexpr int SUB_FONT = SMALL_FONT_ID;
 
 const char* NAMES[] = {"Dictionary", "World Factbook", "Wikipedia", "Sky Chart",

@@ -25,7 +25,7 @@ namespace {
 // Body text can be 12, 14 or 16pt. Wikipedia leads and Factbook entries are long
 // enough that 16pt cost real paging; 12pt is the default now. All three are
 // registered in main.cpp -- an unregistered font id draws nothing at all.
-constexpr int BODY_FONTS[] = {NOTOSERIF_12_FONT_ID, NOTOSERIF_14_FONT_ID, NOTOSERIF_16_FONT_ID};
+constexpr int BODY_FONTS[] = {BITTER_12_FONT_ID, BITTER_14_FONT_ID, BITTER_16_FONT_ID};
 constexpr int FONT_STEPS = 3;
 constexpr int HEAD_FONT = UI_12_FONT_ID;
 

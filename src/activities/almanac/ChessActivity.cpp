@@ -26,7 +26,7 @@
 namespace {
 constexpr int TITLE_FONT = UI_12_FONT_ID;
 constexpr int SMALL = SMALL_FONT_ID;
-constexpr int ROW_FONT = NOTOSERIF_16_FONT_ID;
+constexpr int ROW_FONT = BITTER_16_FONT_ID;
 constexpr bool BLACK = true;
 constexpr bool WHITE = false;
 
@@ -645,7 +645,7 @@ void ChessActivity::drawScrub() {
 
   char buf[64];
   snprintf(buf, sizeof(buf), "P%u of %u", (unsigned)(scrubVal + 1), (unsigned)chCount);
-  renderer.drawCenteredText(NOTOSERIF_18_FONT_ID, pageH / 2 - 30, buf);
+  renderer.drawCenteredText(BITTER_18_FONT_ID, pageH / 2 - 30, buf);
 
   if (nSets) {
     snprintf(buf, sizeof(buf), "%s%s", setNames[setOf(scrubVal)], isSolved(scrubVal) ? "   solved" : "");

@@ -18,8 +18,8 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 namespace {
-constexpr int BIG_FONT = NOTOSERIF_18_FONT_ID;
-constexpr int MID_FONT = NOTOSERIF_16_FONT_ID;
+constexpr int BIG_FONT = BITTER_18_FONT_ID;
+constexpr int MID_FONT = BITTER_16_FONT_ID;
 constexpr int SMALL = SMALL_FONT_ID;
 const char* MON[12] = {"January", "February", "March",     "April",   "May",      "June",
                        "July",    "August",   "September", "October", "November", "December"};

@@ -57,7 +57,7 @@ inline ListLayout computeListLayout(const GfxRenderer& r, int itemCount, int sel
   L.bottom = r.getScreenHeight() - m.buttonHintsHeight - m.verticalSpacing - L.subLine - 8;
   const int avail = std::max(1, L.bottom - L.top);
 
-  static const int FONTS[] = {NOTOSERIF_16_FONT_ID, NOTOSERIF_14_FONT_ID, NOTOSERIF_12_FONT_ID,
+  static const int FONTS[] = {BITTER_16_FONT_ID, BITTER_14_FONT_ID, BITTER_12_FONT_ID,
                               UI_12_FONT_ID};
   constexpr int N = (int)(sizeof(FONTS) / sizeof(FONTS[0]));
 

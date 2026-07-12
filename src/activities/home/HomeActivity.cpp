@@ -33,6 +33,7 @@
 #include "RecentBookProgress.h"
 #include "RecentBooksStore.h"
 #include "SavedItemsHomeActivity.h"
+#include "../almanac/AlmanacActivity.h"
 #include "components/UITheme.h"
 #include "components/themes/dashboard/DashboardTheme.h"
 #include "components/themes/lyra/LyraCarouselTheme.h"
@@ -58,6 +59,7 @@ enum class HomeMenuAction {
   Bookmarks,
   FileTransfer,
   Settings,
+  Almanac,
 };
 
 struct HomeMenuEntry {
@@ -265,6 +267,7 @@ void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasRe
 
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   items.push({tr(STR_SETTINGS_TITLE), Settings, HomeMenuAction::Settings});
+  items.push({"Almanac", Library, HomeMenuAction::Almanac});
 }
 
 HomeMenuEntries buildHomeMenuItems(bool hasOpdsServers, bool hasReadingStats, bool hasBookmarks, bool hasClippings) {
@@ -1470,6 +1473,9 @@ void HomeActivity::loop() {
           case HomeMenuAction::ContinueReading:
           case HomeMenuAction::Settings:
             break;
+          case HomeMenuAction::Almanac:
+            onAlmanacOpen();
+            break;
         }
       }
       return;
@@ -1665,6 +1671,9 @@ void HomeActivity::loop() {
         break;
       case HomeMenuAction::Settings:
         onSettingsOpen();
+        break;
+      case HomeMenuAction::Almanac:
+        onAlmanacOpen();
         break;
     }
   }
@@ -1885,6 +1894,14 @@ void HomeActivity::onContinueReading() {
 void HomeActivity::onRecentsOpen() { activityManager.goToRecentBooks(); }
 
 void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
+
+// Opens the Almanac. It owns its own submenu (dictionary, factbook, wikipedia,
+// sky chart, tsumego, chess, clock, location), so we just push it and refresh
+// when it returns -- mirroring how onReadingStatsOpen presents a sub-activity.
+void HomeActivity::onAlmanacOpen() {
+  startActivityForResult(std::make_unique<AlmanacActivity>(renderer, mappedInput),
+                         [this](const ActivityResult&) { requestUpdate(); });
+}
 
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 

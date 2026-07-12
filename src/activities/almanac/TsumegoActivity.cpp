@@ -24,7 +24,7 @@
 namespace {
 constexpr int TITLE_FONT = UI_12_FONT_ID;
 constexpr int SMALL = SMALL_FONT_ID;
-constexpr int ROW_FONT = NOTOSERIF_16_FONT_ID;
+constexpr int ROW_FONT = BITTER_16_FONT_ID;
 constexpr bool BLACK = true;
 constexpr bool WHITE = false;
 
@@ -463,6 +463,15 @@ void TsumegoActivity::loop() {
   }
 
   // ---- menus ---------------------------------------------------------------
+  if (mode == SETMENU && nSets == 0) {  // TSU1 file: nothing to choose from
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
+        mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      mode = MENU;
+      requestUpdate();
+    }
+    return;
+  }
+
   if (mode == MENU || mode == SETMENU) {
     const int count = (mode == MENU) ? MENU_COUNT : nSets;
     int& sel = (mode == MENU) ? menuSel : setSel;
@@ -703,6 +712,21 @@ void TsumegoActivity::drawSetMenu() {
   const int pageW = renderer.getScreenWidth();
   GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Problem sets");
 
+  // A TSU1 file carries no set table, so there is genuinely nothing to list.
+  // Say so, rather than drawing an empty screen.
+  if (nSets == 0) {
+    const int pageH = renderer.getScreenHeight();
+    renderer.drawCenteredText(ROW_FONT, pageH / 2 - 20, "No problem sets");
+    renderer.drawCenteredText(SMALL, pageH / 2 + 12,
+                              "This problems.bin is in the older TSU1 format,");
+    renderer.drawCenteredText(SMALL, pageH / 2 + 12 + renderer.getLineHeight(SMALL) + 4,
+                              "which stores no set names. Problems still work.");
+    const auto lbl = mappedInput.mapLabels("Back", "Back", "", "");
+    GUI.drawButtonHints(renderer, lbl.btn1, lbl.btn2, lbl.btn3, lbl.btn4);
+    renderer.displayBuffer();
+    return;
+  }
+
   // A TSU2 file may carry up to 16 sets; scroll rather than crop.
   const ListLayout L = computeListLayout(renderer, nSets, setSel, /*wantBlurb=*/true);
   const int pad = m.contentSidePadding;
@@ -741,7 +765,7 @@ void TsumegoActivity::drawScrub() {
 
   char buf[48];
   snprintf(buf, sizeof(buf), "P%u of %u", (unsigned)(scrubVal + 1), (unsigned)problemCount);
-  renderer.drawCenteredText(NOTOSERIF_18_FONT_ID, pageH / 2 - 30, buf);
+  renderer.drawCenteredText(BITTER_18_FONT_ID, pageH / 2 - 30, buf);
 
   if (nSets) {
     snprintf(buf, sizeof(buf), "%s%s", setNames[setOf(scrubVal)], isSolved(scrubVal) ? "   solved" : "");
