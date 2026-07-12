@@ -18,7 +18,8 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 namespace {
-constexpr int BIG_FONT = BITTER_18_FONT_ID;
+// Bitter 18/20 report line-height 0 on CrossInk; 16 is the largest that works.
+constexpr int BIG_FONT = BITTER_16_FONT_ID;
 constexpr int MID_FONT = BITTER_16_FONT_ID;
 constexpr int SMALL = SMALL_FONT_ID;
 const char* MON[12] = {"January", "February", "March",     "April",   "May",      "June",
@@ -147,23 +148,33 @@ void ClockActivity::render(RenderLock&&) {
     const int bigH = renderer.getLineHeight(BIG_FONT);
     const int smallH = renderer.getLineHeight(SMALL);
 
+    // Each field's column must be as wide as the WIDER of its value and its
+    // label -- the labels ("month", "year") are wider than the two-digit values,
+    // so sizing columns to the value alone let a label spill into its neighbour.
+    // That was the "jumble of overlapping letters".
+    int fieldW[F_COUNT];
     int totalW = 0;
-    for (int i = 0; i < F_COUNT; i++)
-      totalW += renderer.getTextWidth(BIG_FONT, parts[i]) + renderer.getTextWidth(BIG_FONT, SEP[i]);
+    for (int i = 0; i < F_COUNT; i++) {
+      const int vw = renderer.getTextWidth(BIG_FONT, parts[i]);
+      const int lw = renderer.getTextWidth(SMALL, LABEL[i]);
+      fieldW[i] = (lw > vw ? lw : vw) + 10;  // a little breathing room
+      totalW += fieldW[i] + renderer.getTextWidth(BIG_FONT, SEP[i]);
+    }
 
     const int labelTop = pageH / 2 - 60;
     const int valueTop = labelTop + smallH + 6;
 
     int x = (pageW - totalW) / 2;
     for (int i = 0; i < F_COUNT; i++) {
-      const int w = renderer.getTextWidth(BIG_FONT, parts[i]);
+      const int w = fieldW[i];
 
-      // label, centred over its field
+      // label, centred in the column
       const int lw = renderer.getTextWidth(SMALL, LABEL[i]);
       renderer.drawText(SMALL, x + (w - lw) / 2, labelTop, LABEL[i]);
 
-      // value, always plain black so it stays readable
-      renderer.drawText(BIG_FONT, x, valueTop, parts[i]);
+      // value, centred in the column, always plain black
+      const int vw = renderer.getTextWidth(BIG_FONT, parts[i]);
+      renderer.drawText(BIG_FONT, x + (w - vw) / 2, valueTop, parts[i]);
 
       // caret under the active field
       if (i == field_) {
@@ -173,7 +184,8 @@ void ClockActivity::render(RenderLock&&) {
       }
 
       x += w;
-      renderer.drawText(BIG_FONT, x, valueTop, SEP[i]);
+      const int sepTop = valueTop;
+      renderer.drawText(BIG_FONT, x, sepTop, SEP[i]);
       x += renderer.getTextWidth(BIG_FONT, SEP[i]);
     }
 

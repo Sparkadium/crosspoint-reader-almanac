@@ -23,7 +23,10 @@
 #include "fontIds.h"
 
 namespace {
-constexpr int BIG_FONT = BITTER_18_FONT_ID;
+// Bitter 18 and 20 report a line-height of 0 on CrossInk (their font data
+// lacks the metric), which stacked every value on top of its label. 16 is the
+// largest Bitter size that measures correctly, and it is barely smaller.
+constexpr int BIG_FONT = BITTER_16_FONT_ID;
 constexpr int SMALL = SMALL_FONT_ID;
 const char* LABEL[] = {"latitude", "longitude", "utc offset", "daylight saving"};
 const char* PROMPT[] = {"Latitude (e.g. 45.3475)", "Longitude, east positive (e.g. -75.7566)",
@@ -225,23 +228,33 @@ void LocationActivity::render(RenderLock&&) {
   Location::offsetLabel(vals[F_OFFSET], 24, offMin_);
   snprintf(vals[F_DST], 24, "%s", Location::dstRuleName(dstRule_));
 
+
   const int bigH = renderer.getLineHeight(BIG_FONT);
   const int smallH = renderer.getLineHeight(SMALL);
-  const int rowH = smallH + 4 + bigH + 16;
-  const int top = m.topPadding + m.headerHeight + m.verticalSpacing + 16;
   const int pad = m.contentSidePadding;
+
+  // Fit the four rows into the space between the header and the button hints,
+  // whatever the theme's metrics turn out to be. Deriving the row pitch from the
+  // real measured height (rather than a fixed guess) keeps the label and value
+  // from stacking on top of each other if SMALL/BIG are taller under CrossInk.
+  const int top = m.topPadding + m.headerHeight + m.verticalSpacing + 12;
+  const int hintsTop = pageH - m.buttonHintsHeight - m.verticalSpacing - smallH * 4 - 12;
+  const int minRow = smallH + 6 + bigH + 12;         // label + gap + value + air
+  int rowH = (hintsTop - top) / F_COUNT;
+  if (rowH < minRow) rowH = minRow;                  // never let rows collapse
 
   for (int i = 0; i < F_COUNT; i++) {
     const int rowTop = top + i * rowH;
     renderer.drawText(SMALL, pad + 4, rowTop, LABEL[i]);
-    renderer.drawText(BIG_FONT, pad + 4, rowTop + smallH + 4, vals[i]);
+    const int valTop = rowTop + smallH + 6;
+    renderer.drawText(BIG_FONT, pad + 4, valTop, vals[i]);
     if (i == field_) {
       const int w = renderer.getTextWidth(BIG_FONT, vals[i]);
-      renderer.fillRect(pad + 4, rowTop + smallH + 4 + bigH + 2, w, 4, true);
+      renderer.fillRect(pad + 4, valTop + bigH + 2, w, 4, true);
     }
   }
 
-  int y = top + F_COUNT * rowH + 8;
+  int y = top + F_COUNT * rowH + 6;
   renderer.drawText(SMALL, pad + 4, y,
                     field_ == F_DST ? "Confirm cycles the rule" : "Confirm to type the value");
   y += smallH + 4;

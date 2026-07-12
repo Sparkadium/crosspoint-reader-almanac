@@ -765,7 +765,7 @@ void TsumegoActivity::drawScrub() {
 
   char buf[48];
   snprintf(buf, sizeof(buf), "P%u of %u", (unsigned)(scrubVal + 1), (unsigned)problemCount);
-  renderer.drawCenteredText(BITTER_18_FONT_ID, pageH / 2 - 30, buf);
+  renderer.drawCenteredText(BITTER_16_FONT_ID, pageH / 2 - 30, buf);  // 18 has no metric on CrossInk
 
   if (nSets) {
     snprintf(buf, sizeof(buf), "%s%s", setNames[setOf(scrubVal)], isSolved(scrubVal) ? "   solved" : "");
