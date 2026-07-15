@@ -142,8 +142,9 @@ class DictionaryActivity final : public Activity {
   bool sawBackPress_ = false;
   bool backLongHandled_ = false;
 
-  // Body text size, cycled with a long press on Back and kept in NVS.
-  // 0 = 12pt, 1 = 14pt, 2 = 16pt (the old fixed size).
+  // Body text size, cycled with a long press on Back and kept in NVS. The
+  // available steps depend on the build variant: only font sizes whose data
+  // survives the OMIT_*_FONT flags are offered (see BODY_FONTS in the .cpp).
   uint8_t fontStep_ = 0;
   int bodyFont() const;
   void cycleFont();

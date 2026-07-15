@@ -21,7 +21,7 @@
 //     correct anywhere on Earth.
 //
 // Buttons: Back exit | Left -30min | Right +30min | Confirm back to now
-//          Up +1 day | Down -1 day
+//          Up +1 day | Down -1 day | hold Confirm: hide/show all text
 //
 #include <ctime>
 
@@ -49,6 +49,13 @@ class SkyActivity final : public Activity {
   // Act on a release only if this activity saw the press.
   bool sawBackPress_ = false;
   bool sawConfirmPress_ = false;
+  bool confirmLong_ = false;
+
+  // One switch for ALL chrome -- header, date line, moon/sun bar, hints, and
+  // the cardinal letters -- leaving just the sky disc. Hold Confirm to
+  // toggle; kept in NVS. The disc's position and size are computed the same
+  // way in both states, so toggling never moves the chart.
+  bool infoUi_ = true;
 
   // Geometry, computed in render() from the real screen size.
   mutable int cx_ = 240, cy_ = 330, radius_ = 210;

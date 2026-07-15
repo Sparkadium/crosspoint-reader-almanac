@@ -5,6 +5,8 @@
 
 #include "SkyActivity.h"
 
+#include <Preferences.h>
+
 #include <GfxRenderer.h>
 
 #include <cmath>
@@ -17,6 +19,7 @@
 #include "TimeSource.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "FallbackMoment.h"
 #include "sky_math.h"
 #include "stars.h"
 namespace {
@@ -44,18 +47,33 @@ void drawCircleR(const GfxRenderer& r, int cx, int cy, int rad, bool state) {
 }
 constexpr bool BLACK = true;
 constexpr bool WHITE = false;
+constexpr uint16_t LONG_PRESS_MS = 700;
 }  // namespace
 
 void SkyActivity::onEnter() {
   Activity::onEnter();
   Location::begin();
   TimeSource::begin();  // seeds the system clock from the RTC, on boards that have one
-  lat_ = Location::get().lat;
-  lon_ = Location::get().lon;
   timeSet_ = TimeSource::isSet();
-  baseUtc_ = TimeSource::nowUtc();
+  if (timeSet_) {
+    lat_ = Location::get().lat;
+    lon_ = Location::get().lon;
+    baseUtc_ = TimeSource::nowUtc();
+  } else {
+    // no clock: show the fallback moment's sky instead of a dead screen
+    lat_ = fallback_moment::LAT;
+    lon_ = fallback_moment::LON;
+    baseUtc_ = fallback_moment::utc();
+  }
   offsetMin_ = 0;
   sawBackPress_ = sawConfirmPress_ = false;
+  confirmLong_ = false;
+  {
+    Preferences p;
+    p.begin("almanac", true);
+    infoUi_ = p.getUChar("skyui", 1) != 0;
+    p.end();
+  }
   requestUpdate();
 }
 
@@ -78,18 +96,34 @@ void SkyActivity::loop() {
     finish();
     return;
   }
-  if (!timeSet_) return;
-
   bool moved = false;
   if (mappedInput.wasPressed(MappedInputManager::Button::Right)) { offsetMin_ += 30; moved = true; }
   if (mappedInput.wasPressed(MappedInputManager::Button::Left))  { offsetMin_ -= 30; moved = true; }
   if (mappedInput.wasPressed(MappedInputManager::Button::Up))    { offsetMin_ += 1440; moved = true; }
   if (mappedInput.wasPressed(MappedInputManager::Button::Down))  { offsetMin_ -= 1440; moved = true; }
-  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) sawConfirmPress_ = true;
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+    sawConfirmPress_ = true;
+    confirmLong_ = false;
+  }
+  if (sawConfirmPress_ && !confirmLong_ && mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
+      mappedInput.getHeldTime() > LONG_PRESS_MS) {
+    confirmLong_ = true;  // hold Confirm: toggle every piece of chrome at once
+    infoUi_ = !infoUi_;
+    Preferences p;
+    p.begin("almanac", false);
+    p.putUChar("skyui", infoUi_ ? 1 : 0);
+    p.end();
+    requestUpdate();
+    return;
+  }
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) && sawConfirmPress_) {
+    const bool wasLong = confirmLong_;
     sawConfirmPress_ = false;
-    offsetMin_ = 0;
-    moved = true;
+    confirmLong_ = false;
+    if (!wasLong) {
+      offsetMin_ = 0;
+      moved = true;
+    }
   }
   if (moved) requestUpdate();
 }
@@ -100,23 +134,7 @@ void SkyActivity::render(RenderLock&&) {
   const int pageW = renderer.getScreenWidth();
   const int pageH = renderer.getScreenHeight();
 
-  GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Sky Chart");
-
-  if (!timeSet_) {
-    renderer.drawCenteredText(HEAD_FONT, pageH / 2 - 20, "Time not set");
-    renderer.drawCenteredText(SMALL, pageH / 2 + 10, "Open Clock to set the date and time");
-    const int l2 = pageH / 2 + 10 + renderer.getLineHeight(SMALL) + 4;
-    renderer.drawCenteredText(SMALL, l2, "Set your coordinates in Almanac > Location");
-    if (TimeSource::rtcStatus() == TimeSource::Clock::NoLibrary)
-      renderer.drawCenteredText(SMALL, l2 + renderer.getLineHeight(SMALL) + 4,
-                                "Built without RTC support; on X3 add the Rtc flag.");
-    else if (TimeSource::rtcStatus() == TimeSource::Clock::NoChip)
-      renderer.drawCenteredText(SMALL, l2 + renderer.getLineHeight(SMALL) + 4,
-                                "This device has no clock chip; sleep clears the time.");
-    GUI.drawButtonHints(renderer, "Back", "", "", "");
-    renderer.displayBuffer();
-    return;
-  }
+  if (infoUi_) GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Sky Chart");
 
   // ---- time under the current offset --------------------------------------
   const time_t viewUtc = baseUtc_ + (time_t)offsetMin_ * 60;
@@ -145,7 +163,8 @@ void SkyActivity::render(RenderLock&&) {
   const int contentTop = m.topPadding + m.headerHeight + m.verticalSpacing;
   const int barTop = pageH - m.buttonHintsHeight - m.verticalSpacing - lineH * 3 - 20;
   const int headerLineY = contentTop;
-  const int diskTop = headerLineY + lineH + 12;
+  const int diskTop = headerLineY + lineH + 12 + 5;  // +5: sits better between
+                                                     // the date line and bar
 
   radius_ = std::min(pageW / 2 - m.contentSidePadding, (barTop - diskTop) / 2);
   cx_ = pageW / 2;
@@ -155,9 +174,17 @@ void SkyActivity::render(RenderLock&&) {
   char off[16];
   Location::offsetLabel(off, sizeof(off), offMin);
   char hdr[80];
-  snprintf(hdr, sizeof(hdr), "%s %d  %02d:%02d  %s%s", monName[mo - 1], d, hh, mm, off,
-           offsetMin_ ? "  *" : "");
-  renderer.drawCenteredText(SMALL, headerLineY, hdr);
+  if (timeSet_)
+    snprintf(hdr, sizeof(hdr), "%s %d  %02d:%02d  %s%s", monName[mo - 1], d, hh, mm, off,
+             offsetMin_ ? "  *" : "");
+  else  // fallback moment: the year matters, since it is not this year
+    snprintf(hdr, sizeof(hdr), "%s %d %d  %02d:%02d  %s%s", monName[mo - 1], d, y, hh, mm, off,
+             offsetMin_ ? "  *" : "");
+  if (infoUi_) {
+    renderer.drawCenteredText(SMALL, headerLineY, hdr);
+    if (!timeSet_)
+      renderer.drawCenteredText(SMALL, headerLineY - lineH - 2, "clock not set");
+  }
 
   // ---- sky disk ------------------------------------------------------------
   fillCircleR(renderer, cx_, cy_, radius_, BLACK);
@@ -195,38 +222,40 @@ void SkyActivity::render(RenderLock&&) {
   // right: this is an all-sky chart drawn as if you are lying back and looking
   // UP, so the compass runs the opposite way to a map of the ground. Hold it
   // overhead with N pointing north and the stars line up with the real sky.
-  const int capW = renderer.getTextWidth(SMALL, "W");
-  renderer.drawText(SMALL, cx_ - capW / 2, cy_ - radius_ + 6, "N", WHITE);
-  renderer.drawText(SMALL, cx_ - capW / 2, cy_ + radius_ - lineH - 6, "S", WHITE);
-  renderer.drawText(SMALL, cx_ - radius_ + 8, cy_ - lineH / 2, "E", WHITE);
-  renderer.drawText(SMALL, cx_ + radius_ - capW - 8, cy_ - lineH / 2, "W", WHITE);
+  if (infoUi_) {
+    const int capW = renderer.getTextWidth(SMALL, "W");
+    renderer.drawText(SMALL, cx_ - capW / 2, cy_ - radius_ + 6, "N", WHITE);
+    renderer.drawText(SMALL, cx_ - capW / 2, cy_ + radius_ - lineH - 6, "S", WHITE);
+    renderer.drawText(SMALL, cx_ - radius_ + 8, cy_ - lineH / 2, "E", WHITE);
+    renderer.drawText(SMALL, cx_ + radius_ - capW - 8, cy_ - lineH / 2, "W", WHITE);
 
-  // ---- bottom bar: moon + sun ---------------------------------------------
-  renderer.drawLine(m.contentSidePadding, barTop, pageW - m.contentSidePadding, barTop, BLACK);
+    // ---- bottom bar: moon + sun -------------------------------------------
+    renderer.drawLine(m.contentSidePadding, barTop, pageW - m.contentSidePadding, barTop, BLACK);
 
-  const int moonR = 14;
-  const int moonY = barTop + 10 + moonR;
-  drawMoonGlyph(m.contentSidePadding + moonR + 4, moonY, moonR, phase);
+    const int moonR = 14;
+    const int moonY = barTop + 10 + moonR;
+    drawMoonGlyph(m.contentSidePadding + moonR + 4, moonY, moonR, phase);
 
-  char mtxt[40];
-  snprintf(mtxt, sizeof(mtxt), "%s  %d%%", phaseName[phase], (int)lround(illum * 100));
-  renderer.drawText(SMALL, m.contentSidePadding + moonR * 2 + 16, moonY - lineH / 2, mtxt);
+    char mtxt[40];
+    snprintf(mtxt, sizeof(mtxt), "%s  %d%%", phaseName[phase], (int)lround(illum * 100));
+    renderer.drawText(SMALL, m.contentSidePadding + moonR * 2 + 16, moonY - lineH / 2, mtxt);
 
-  char stxt[40];
-  if (sunOk)
-    snprintf(stxt, sizeof(stxt), "rise %02d:%02d   set %02d:%02d", (int)riseL,
-             (int)lround((riseL - (int)riseL) * 60) % 60, (int)setL,
-             (int)lround((setL - (int)setL) * 60) % 60);
-  else
-    snprintf(stxt, sizeof(stxt), "sun: --");
-  renderer.drawText(SMALL, m.contentSidePadding, moonY + moonR + 6, stxt);
-  char loc[48];
-  snprintf(loc, sizeof(loc), "%.4f%c %.4f%c   east is left (chart faces up)",
-           fabs(lat_), lat_ >= 0 ? 'N' : 'S', fabs(lon_), lon_ >= 0 ? 'E' : 'W');
-  renderer.drawText(SMALL, m.contentSidePadding, moonY + moonR + 6 + lineH + 2, loc);
+    char stxt[40];
+    if (sunOk)
+      snprintf(stxt, sizeof(stxt), "rise %02d:%02d   set %02d:%02d", (int)riseL,
+               (int)lround((riseL - (int)riseL) * 60) % 60, (int)setL,
+               (int)lround((setL - (int)setL) * 60) % 60);
+    else
+      snprintf(stxt, sizeof(stxt), "sun: --");
+    renderer.drawText(SMALL, m.contentSidePadding, moonY + moonR + 6, stxt);
+    char loc[48];
+    snprintf(loc, sizeof(loc), "%.4f%c %.4f%c   east is left (chart faces up)",
+             fabs(lat_), lat_ >= 0 ? 'N' : 'S', fabs(lon_), lon_ >= 0 ? 'E' : 'W');
+    renderer.drawText(SMALL, m.contentSidePadding, moonY + moonR + 6 + lineH + 2, loc);
 
-  const auto labels = mappedInput.mapLabels("Back", "Now", "-30 min", "+30 min");
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    const auto labels = mappedInput.mapLabels("Back", "Now", "-30 min", "+30 min");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  }
   renderer.displayBuffer();
 }
 

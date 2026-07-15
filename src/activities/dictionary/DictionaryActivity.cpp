@@ -22,11 +22,38 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 namespace {
-// Body text can be 12, 14 or 16pt. Wikipedia leads and Factbook entries are long
-// enough that 16pt cost real paging; 12pt is the default now. All three are
-// registered in main.cpp -- an unregistered font id draws nothing at all.
-constexpr int BODY_FONTS[] = {BITTER_12_FONT_ID, BITTER_14_FONT_ID, BITTER_16_FONT_ID};
-constexpr int FONT_STEPS = 3;
+// Body text sizes. The OMIT_*_FONT build flags strip font DATA from flash
+// while fontIds.h still defines every ID, so an unguarded list offers sizes
+// that draw NOTHING (the xlarge variant omits 12/14pt -- exactly the two
+// that were blank). Each rung is guarded by its flag, so every variant
+// cycles only through sizes it actually carries: tiny gets 12/14/16 and
+// xlarge gets 16/18/20.
+#if defined(BITTER_18_FONT_ID) && !defined(OMIT_XLARGE_FONT)
+constexpr int BODY_FONTS[] = {
+    SMALL_FONT_ID,
+    UI_12_FONT_ID,
+    BITTER_18_FONT_ID,
+};
+constexpr int BODY_PTS[] = {10, 12, 18};
+
+#elif defined(BITTER_16_FONT_ID) && !defined(OMIT_LARGE_FONT)
+constexpr int BODY_FONTS[] = {
+    SMALL_FONT_ID,
+    UI_12_FONT_ID,
+    BITTER_16_FONT_ID,
+};
+constexpr int BODY_PTS[] = {10, 12, 16};
+
+#else
+constexpr int BODY_FONTS[] = {
+    SMALL_FONT_ID,
+    UI_12_FONT_ID,
+};
+constexpr int BODY_PTS[] = {10, 12};
+#endif
+}
+constexpr int FONT_STEPS = (int)(sizeof(BODY_FONTS) / sizeof(BODY_FONTS[0]));
+static_assert(FONT_STEPS > 0, "every body font size was omitted from this build");
 constexpr int HEAD_FONT = UI_12_FONT_ID;
 
 std::string lower(std::string s) {
@@ -36,7 +63,7 @@ std::string lower(std::string s) {
 uint32_t rd32(const uint8_t* p) {  // little-endian, matches struct.pack('<I')
   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
-}  // namespace
+  // namespace
 
 // ===========================================================================
 //  WcdbReader
@@ -342,7 +369,10 @@ void DictionaryActivity::onExit() {
 }
 
 int DictionaryActivity::bodyFont() const {
-  return BODY_FONTS[fontStep_ < FONT_STEPS ? fontStep_ : 0];
+  const int f = BODY_FONTS[fontStep_ < FONT_STEPS ? fontStep_ : 0];
+  // second net: if a variant strips fonts by some other mechanism, fall back
+  // to the UI font rather than drawing nothing
+  return renderer.getLineHeight(f) > 0 ? f : HEAD_FONT;
 }
 
 void DictionaryActivity::cycleFont() {
@@ -541,7 +571,7 @@ void DictionaryActivity::render(RenderLock&&) {
   // colliding with its neighbours, so state it once, quietly, on the left.
   char foot[64];
   snprintf(foot, sizeof(foot), "hold Search: random   hold Home: text size %dpt",
-           fontStep_ == 0 ? 12 : (fontStep_ == 1 ? 14 : 16));
+           BODY_PTS[fontStep_ < FONT_STEPS ? fontStep_ : 0]);
   renderer.drawText(SMALL_FONT_ID, sidePad,
                     pageH - m.buttonHintsHeight - m.verticalSpacing - renderer.getLineHeight(SMALL_FONT_ID),
                     foot);

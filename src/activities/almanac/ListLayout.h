@@ -57,8 +57,24 @@ inline ListLayout computeListLayout(const GfxRenderer& r, int itemCount, int sel
   L.bottom = r.getScreenHeight() - m.buttonHintsHeight - m.verticalSpacing - L.subLine - 8;
   const int avail = std::max(1, L.bottom - L.top);
 
-  static const int FONTS[] = {BITTER_16_FONT_ID, BITTER_14_FONT_ID, BITTER_12_FONT_ID,
-                              UI_12_FONT_ID};
+  // The OMIT_*_FONT build flags strip font DATA from flash while fontIds.h
+  // still defines every ID, so an unguarded ladder can pick a font that draws
+  // nothing (the xlarge env omits the 10/12/14px reading sizes -- the exact
+  // rungs this ladder descends through once a list grows past what 16px
+  // fits). Guard each rung at compile time, and skip any font the renderer
+  // reports as unregistered at runtime as a second line of defence. UI_12 is
+  // a UI font, present in every variant, and terminates the ladder.
+  static const int FONTS[] = {
+#ifndef OMIT_LARGE_FONT
+      BITTER_16_FONT_ID,
+#endif
+#ifndef OMIT_MEDIUM_FONT
+      BITTER_14_FONT_ID,
+#endif
+#ifndef OMIT_SMALL_FONT
+      BITTER_12_FONT_ID,
+#endif
+      UI_12_FONT_ID};
   constexpr int N = (int)(sizeof(FONTS) / sizeof(FONTS[0]));
 
   // Prefer the largest font that shows every row. Failing that, scroll -- do
@@ -75,6 +91,7 @@ inline ListLayout computeListLayout(const GfxRenderer& r, int itemCount, int sel
 
   bool fitsAll = false;
   for (int f = 0; f < N; f++) {
+    if (r.getLineHeight(FONTS[f]) <= 0) continue;  // not registered in this build
     L.boxH = measure(FONTS[f], L.withBlurb);
     if ((L.boxH + ListLayout::AIR) * itemCount <= avail) {
       fitsAll = true;

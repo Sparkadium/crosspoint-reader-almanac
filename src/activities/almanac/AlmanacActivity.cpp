@@ -14,6 +14,9 @@
 #include <new>
 #include <string>
 
+#include "CalcActivity.h"
+#include "GlobeActivity.h"
+#include "MoonActivity.h"
 #include "ChessActivity.h"
 #include "ClockActivity.h"
 #include "HalStorage.h"
@@ -29,8 +32,8 @@ namespace {
 constexpr int ROW_FONT = BITTER_16_FONT_ID;
 constexpr int SUB_FONT = SMALL_FONT_ID;
 
-const char* NAMES[] = {"Dictionary", "World Factbook", "Wikipedia", "Sky Chart",
-                       "Tsumego",    "Chess",          "Clock",     "Location"};
+const char* NAMES[] = {"Dictionary", "Wikipedia", "World Factbook", "Globe",  "Moon",
+                       "Sky Chart",  "Calculator", "Chess",  "Tsumego", "Clock",  "Location"};
 
 // Group digits: 69123 -> "69,123"
 std::string withCommas(uint32_t n) {
@@ -79,6 +82,9 @@ void AlmanacActivity::refreshBlurbs() {
   blurbs_[TSUMEGO] = "Go life-and-death problems";  // count lives in problems.bin
   const uint32_t puzzles = chessPuzzleCount();
   blurbs_[CHESS] = puzzles ? withCommas(puzzles) + " Lichess puzzles" : "chess.bin not on SD card";
+  blurbs_[CALCULATOR] = "plot f(x), evaluate expressions";
+  blurbs_[GLOBE] = "spin the Earth, live day and night";
+  blurbs_[MOON] = "the Moon as it faces you tonight";
   blurbs_[CLOCK] = "set the date and time";
   blurbs_[LOCATION] = "coordinates, UTC offset, DST rule";
 }
@@ -127,6 +133,18 @@ void AlmanacActivity::open(Item item) {
     case CHESS:
       status_.clear();
       startActivityForResult(std::make_unique<ChessActivity>(renderer, mappedInput), onReturn);
+      break;
+    case CALCULATOR:
+      status_.clear();
+      startActivityForResult(std::make_unique<CalcActivity>(renderer, mappedInput), onReturn);
+      break;
+    case GLOBE:
+      status_.clear();
+      startActivityForResult(std::make_unique<GlobeActivity>(renderer, mappedInput), onReturn);
+      break;
+    case MOON:
+      status_.clear();
+      startActivityForResult(std::make_unique<MoonActivity>(renderer, mappedInput), onReturn);
       break;
     case CLOCK:
       status_.clear();
