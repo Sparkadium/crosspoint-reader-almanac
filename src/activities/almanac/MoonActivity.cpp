@@ -293,7 +293,7 @@ void MoonActivity::drawMoon(int cx, int cy, int R) {
     }
   }
 
-  // ---- limb (white against space) ----------------------------------
+  // ---- limb (white against space) + reticle ----------------------------------
   int x = R, y0 = 0, err = 1 - R;
   auto put = [&](int X, int Y) {
     if (X >= (int)xl && X < (int)xr && Y >= (int)yt && Y < (int)yb)
@@ -306,14 +306,18 @@ void MoonActivity::drawMoon(int cx, int cy, int R) {
     if (err < 0) err += 2 * y0 + 1;
     else { x--; err += 2 * (y0 - x) + 1; }
   }
+  renderer.drawLine(cx - 16, cy, cx - 6, cy, 2, BLACK);
+  renderer.drawLine(cx + 6, cy, cx + 16, cy, 2, BLACK);
+  renderer.drawLine(cx, cy - 16, cx, cy - 6, 2, BLACK);
+  renderer.drawLine(cx, cy + 6, cx, cy + 16, 2, BLACK);
 }
 
 void MoonActivity::render(RenderLock&&) {
-  renderer.clearScreen();
   const auto& m = UITheme::getInstance().getMetrics();
   const int pageW = renderer.getScreenWidth();
   const int pageH = renderer.getScreenHeight();
   const int lineH = renderer.getLineHeight(SMALL);
+  renderer.clearScreen();
 
   if (chrome_) GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Moon");
 
@@ -324,6 +328,35 @@ void MoonActivity::render(RenderLock&&) {
 
   drawMoon(cx, cy, R);
 
+  drawInfoBar(barTop);
+
+  if (needFull_) {
+    // Ghost scrub, disc only. A whole-panel FULL_REFRESH takes seconds, but
+    // the ghosting lives only under the disc's dither -- so push one frame
+    // with the disc solid black (driving those pixels through a full swing,
+    // which is what actually erases residue), then the real frame. Two FAST
+    // refreshes, and only the disc visibly blinks.
+    needFull_ = false;
+    for (int Y = cy - R; Y <= cy + R; Y++) {
+      const float dy = (float)(Y - cy) / R;
+      const int dx = (int)(R * sqrtf(std::max(0.0f, 1.0f - dy * dy)));
+      if (dx > 0 && Y >= 0 && Y < pageH)
+        renderer.drawLine(std::max(0, cx - dx), Y, std::min(pageW - 1, cx + dx), Y, BLACK);
+    }
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    // now the real frame: redraw everything from scratch
+    renderer.clearScreen();
+    if (chrome_) GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Moon");
+    drawMoon(cx, cy, R);
+    drawInfoBar(barTop);
+  }
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+}
+
+void MoonActivity::drawInfoBar(int barTop) {
+  const auto& m = UITheme::getInstance().getMetrics();
+  const int pageW = renderer.getScreenWidth();
+  const int lineH = renderer.getLineHeight(SMALL);
   if (chrome_) {
   renderer.drawLine(m.contentSidePadding, barTop, pageW - m.contentSidePadding, barTop, BLACK);
   char l1[80], l2[64], l3[64];
@@ -345,6 +378,4 @@ void MoonActivity::render(RenderLock&&) {
   const auto labels = mappedInput.mapLabels("Back", "Zoom", "Spin", "Spin");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }
-  renderer.displayBuffer(needFull_ ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH);
-  needFull_ = false;
 }

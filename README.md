@@ -1,158 +1,131 @@
-> **This is a personal fork of [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)** with a focus on improved fonts and minimal reading stats.
+# CrossInk Almanac
 
-## What's different in this fork
+A reference library, atlas, planetarium, and puzzle collection for the
+Xteink X4/X3 e-readers, built as a fork of
+[CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)
+(CrossInk variant). Everything runs offline from the SD card on an
+ESP32-C3 with ~320 KB of RAM, and everything on screen is computed or
+sourced — nothing hand-drawn, nothing invented.
 
-My goal with this fork was to maintain the core Crosspoint firmware while integrating my preferred typography and some lightweight reading statistics. I’ve focused on keeping the underlying system stable while layering in a few "nice-to-have" features and UI refinements along the way.
+## Modules
 
-<table>
-  <tr>
-    <td align="center">
-      <img src="./docs/images/bitter-small-15-margin.jpg" alt="Font: Bitter, Size: 12 pt, Margin: 15" /><br/>
-      <em>Font: Bitter, Size: 12 pt, Margin: 15</em>
-    </td>
-    <td align="center">
-      <img src="./docs/images/reading-stats.jpg" alt="Reading Stats with custom front button mapping shown" /><br/>
-      <em>Reading Stats with custom front button mapping shown</em>
-    </td>
-  </tr>
-</table>
+**Dictionary** — 69,000+ word offline dictionary. Type-ahead search,
+prefix browsing, synonym redirects, random word, adjustable text size.
 
----
+**Wikipedia** — Simple English Wikipedia, same engine. The block-compressed
+WCDB format streams from the SD card with binary search over an on-card
+index, so corpus size is limited by the card, not by RAM.
 
-**Note**: This firmware is confirmed to be working on both the X3 and X4.
+**World Factbook** — the CIA World Factbook as a gazetteer: geography,
+government, history, and statistics for every country and territory.
 
-### Highlights
+**Globe** — a spinning orthographic Earth under a fixed crosshair.
+Live day/night terminator with civil-twilight band, country borders,
+country identification under the reticle with one-press Factbook entry,
+find-a-country (205 countries, flies to the capital), three zoom levels,
+and a full-bleed space mode with starfield. Everything is toggleable down
+to a bare planet.
 
-- New reader fonts: Lexend Deca and Bitter.
-- Unicode emoji and miscellaneous symbols support (a limited subset).
-- Adjusted font sizes: 8 pt, 9 pt, 10 pt, 12 pt, 14 pt, 16 pt, 18 pt, and 20 pt. See [Font Build Variants](./docs/font-build-variants.md) for more details.
-- Added ~~strikethrough~~ support.
-- Made <u>underlines</u> thicker for better visibility.
-- Added a custom `Minimal` theme and sleep screen option for the minimalists out there.
-- Added a custom `Dashboard` theme and sleep screen option for reading stats enthusiasts.
-- Added support for `<hr>` section breaks.
-- Added support for "redaction" style rendering.
-- Added improved support for tables with simple markup.
-- Added ability to add bookmarks.
-- Added ability to remap front buttons that only applies in the reader.
-- Added Bionic Reading and Guide Dots as optional reader modes.
-- Added Force Paragraph Indents for books that render as one giant wall of text.
-- Added ability to pin a sleep image as a favorite. The favorited image will always be displayed when your sleep settings are set to `Custom` or `Cover + Custom` (when no cover is available).
-- Added more in-reader control remapping options for side buttons, short power button clicks, and long-press menu actions.
-- Added ability to mark a book as finished from the in-book menu. A pop-up will also display once 99% of the book is reached. This status allows tracking of total books read.
-- Added ability to move finished books to "Read" folder.
-- In-book menu to quickly adjust reader options without having to exit the book.
-- Reading stats: total books read, total reading time, number of sessions, pages turned, average session time, pages turned per minute. You can also set your reading stats as your sleep screen.
-- All-time reading stats [syncing](./docs/reading-stats-sync.md) between two CrossInk devices.
-- Reading [progress sync](./docs/nearby-position-sync.md) between two CrossInk devices.
-- Added customizable Auto Page Turn Interval (anything between 5-120 seconds).
-- Added ability to view Recent Books as a 3x3 grid view.
-- To view a more detailed list for each version, visit the [releases](https://github.com/uxjulia/CrossInk/releases) page to read release notes.
+**Moon** — the Moon as it faces you tonight. The home view is the real
+sub-Earth point (optical libration included), the terminator matches the
+current phase, and ~400 named features from the IAU/USGS Gazetteer of
+Planetary Nomenclature appear with zoom-based level of detail: maria as
+dotted regions, craters as rim circles at true scale. The reticle names
+the nearest feature.
 
----
+**Sky Chart** — all-sky star chart for your location: 904 stars (Yale
+Bright Star Catalogue, V ≤ 4.5) with constellation lines, moon phase,
+sunrise/sunset, and time travel in 30-minute or 1-day steps. One gesture
+hides all chrome for a bare sky.
 
-### Reader Fonts
+**Calculator** — graphing calculator with a purpose-built one-layer math
+keypad, six expression slots, and Y=-style function plotting.
 
-The default fonts have been replaced with Lexend Deca and Bitter. These fonts have been chosen specifically to improve reading fluency and e-ink performance. These 'sturdier' typefaces feature uniform stroke weights and open geometries, allowing the X4/X3 to render crisp, high-contrast text with font-aliasing on while significantly reducing ghosting and artifacts.
+**Chess** — Lichess puzzle trainer with rating bands and native vector
+piece sprites.
 
-- [Lexend Deca](https://fonts.google.com/specimen/Lexend+Deca) - A research-backed sans-serif typeface designed to improve reading fluency. Lexend was engineered based on the theory that reading issues are often a design problem (visual crowding) rather than a cognitive one.
-- [Bitter](https://fonts.google.com/specimen/Bitter) - A "contemporary" slab serif typeface for text, it is specially designed for comfortably reading on digital screens. The consistent stroke weight of Bitter helps it render particularly well on e-ink devices. The medium weight has been chosen specifically for improved rendering on the X4/X3.
+**Tsumego** — 11,800+ Go life-and-death problems with tree-walking
+solution verification and progress tracking.
 
-The UI now uses [Inter](https://fonts.google.com/specimen/Inter) as the display font which has improved readability at smaller sizes.
+**Clock / Location** — set the time and your coordinates/UTC offset/DST
+rule; every sky module derives from these. If the clock is unset, the sky
+modules show a clearly-labelled fixed fallback moment instead of a dead
+screen.
 
-### Emojis and Misc Glyphs
+## SD card setup
 
-- Support for a limited set of Unicode [Emoticons](https://unicode-explorer.com/b/1F600) and [Miscellaneous Symbols](https://unicode-explorer.com/b/2600) using [Noto Emoji](https://fonts.google.com/noto/specimen/Noto+Emoji) and [Noto Sans Symbols](https://fonts.google.com/noto/specimen/Noto+Sans+Symbols) font.
+See [SD_CARD.md](SD_CARD.md). Short version: eight data files go in the
+card root; each module degrades gracefully (and says which file it wants)
+if its file is absent. All files are downloadable from the Releases page
+or regenerable with the scripts in `tools/`.
 
----
+## Building
 
-### Font Sizes
+PlatformIO. The device firmware is the `xlarge` env:
 
-There are 2 available build variants to choose from due to build size constraints: `tiny`, and `xlarge`.
-
-See [Font Build Variants](./docs/font-build-variants.md) for the full point-size and emoji-support matrix.
-
----
-
-### Reader features
-
-Reader Options, Bionic Reading, Guide Dots, Force Paragraph Indents, reading stats, and finished-book behavior are documented in [Reader Features](./docs/reader-features.md).
-
-### Custom button actions
-
-CrossInk adds configurable button shortcuts.
-
-See [Controls](./docs/controls.md) for the full action list and defaults.
-
----
-
-## Tips for the best reading experience
-
-CrossInk runs on an ESP32-C3 with limited RAM, so very large folders or complex EPUBs can be slower than they would be on a phone, tablet, or desktop app.
-
-- Keep folders under about 200 files. For the smoothest browsing, aim for 50-100 files per folder.
-- Having 1000+ books on the SD card is fine if they are split into smaller folders, such as by author, series, genre, or read/unread status.
-- Avoid putting every book in the SD card root. The file browser has to scan and sort the current folder before it can show it.
-- Text-first EPUBs are the best fit. Large image-heavy EPUBs, scanned books, comics, and omnibus files with thousands of sections may load slowly or fail under memory pressure.
-- As a rough target, EPUBs under 20 MB tend to work the best. Files over 50 MB may still work, but they are more likely to be slow or memory-sensitive, especially if they contain many large images.
-- If an EPUB is unusually slow, try [optimizing](./docs/webserver.md#epub-optimization) it with the built-in web optimizer (via File Transfer) before copying it to the SD card: remove unused high-resolution images, split very large omnibus files, and avoid embedding multiple full font families when possible.
-- Use a reliable SD card and leave some free space. CrossInk stores settings, reading progress, cache files, stats, and generated book data on the card.
-
-## Development Device Simulator
-
-The [device simulator](https://github.com/uxjulia/crosspoint-simulator) renders the e-ink display in an SDL2 window so firmware changes can be sanity-checked without flashing hardware.
-
-See [Simulator](./docs/simulator.md) for setup, platform notes, keyboard controls, and cache tips.
-
----
-
-## Installation
-
-Download a `firmware-*.bin` from the [releases page](https://github.com/uxjulia/CrossInk/releases), then flash it with the web installer or command line.
-
-See [Installation](./docs/installation.md) for step-by-step flashing and revert instructions.
-
----
-
-## Documentation
-
-- [User Guide](./USER_GUIDE.md)
-- [Installation](./docs/installation.md)
-- [Font Build Variants](./docs/font-build-variants.md)
-- [Reader Features](./docs/reader-features.md)
-- [Controls](./docs/controls.md)
-- [Simulator](./docs/simulator.md)
-- [Data Cache](./docs/data-cache.md)
-- [Web server usage](./docs/webserver.md)
-- [Web server endpoints](./docs/webserver-endpoints.md)
-- [Common issues](./docs/troubleshooting.md)
-- [Project scope](./SCOPE.md)
-- [Contributing docs](./docs/contributing/README.md)
-
----
-
-## Development quick start
-
-CrossInk uses PlatformIO for building and flashing firmware.
-
-See [Getting Started](./docs/contributing/getting-started.md) for prerequisites, clone setup, hooks, and validation commands.
-
-### Build / flash / monitor
-
-Connect your Xteink X4 or X3 via USB-C and run:
-
-```sh
-pio run -e tiny --target upload
+```
+pio run -e xlarge --target upload
 ```
 
-Replace `tiny` with another build variant if needed. See [Font Build Variants](./docs/font-build-variants.md).
+Font variants: `tiny` ships the smaller reading sizes, `xlarge` the three
+largest (16/18/20 px). UI code adapts to whichever sizes a variant
+actually carries.
 
-See [Testing and Debugging](./docs/contributing/testing-debugging.md) for serial logging, simulator checks, static analysis, and bug-report guidance.
+X3 hardware clock: the `xlarge` env builds with `ALMANAC_USE_FREEINK_RTC`,
+so an X3's battery-backed RTC keeps time across power-off. The X4 has no
+clock chip; it reports that honestly and asks for the time after deep
+sleep.
 
----
+## Data provenance
 
-## Internals
+A strict rule applies throughout: all data comes from authoritative,
+scriptable public sources. No hand-entered records, no generated data.
+Every data file is rebuilt from source by a script in `tools/`:
 
-The ESP32-C3 has about 380 KB of usable RAM, so CrossInk stores reusable book and device data on the SD card instead of rebuilding everything in memory.
+| Data | Source | License |
+|---|---|---|
+| Coastlines, borders, capitals | [Natural Earth](https://www.naturalearthdata.com) 1:110m | Public domain |
+| Country facts | [CIA World Factbook](https://github.com/factbook/factbook.json) | Public domain |
+| Lunar features | [USGS/IAU Gazetteer of Planetary Nomenclature](https://planetarynames.wr.usgs.gov) | Public domain |
+| Stars | Yale Bright Star Catalogue (FK5) | Free use |
+| Chess puzzles | [Lichess puzzle database](https://database.lichess.org/#puzzles) | CC0 |
+| Tsumego problems | [sanderland/tsumego](https://github.com/sanderland/tsumego) | MIT |
+| Dictionary/Wikipedia | Wiktionary / Simple English Wikipedia | CC BY-SA |
 
-See [Data Cache](./docs/data-cache.md) for the `.crosspoint` layout and [File Formats](./docs/file-formats.md) for binary cache details.
+## Verification
+
+Every mathematical component ships with a host-side test harness
+(`tools/almanac/`) comparing the exact C++ that runs on the device against
+an independent reference. Current receipts:
+
+- Sun and sky positions: verified against astropy
+- Day/night terminator geometry: 2.85M pixel checks against brute force,
+  0 mismatches
+- Country hit-testing and capital coordinates: 25 cases including
+  enclaves (Lesotho), microstates inside larger polygons (Singapore,
+  Vatican), and open ocean
+- Moon orientation: 501 dates over 2020–2030 against JPL DE421's
+  integrated lunar librations, worst error 0.11°
+- Calculator engine: 451 expressions against Python
+
+Anyone can rerun these: each harness is a single `g++` command plus, where
+a reference is needed, a Python script that generates it from public
+ephemerides or the standard library.
+
+## Devices
+
+Xteink X4 (ESP32-C3, 480×800 e-ink) is the primary target; the X3 is
+supported through CrossPoint's runtime board detection. E-ink niceties
+include dithered night shading, disc-local ghost scrubbing instead of
+full-panel refreshes, and fast-refresh navigation throughout.
+
+## Credits
+
+Built by [Sparkadium](https://github.com/Sparkadium) in collaboration with
+Claude (Anthropic). The division of labor, honestly stated: ideas,
+direction, hardware testing, and stubbornness were human; much of the code
+was written by the AI; all of it was verified against independent
+references before it shipped, per the receipts above.
+
+Forked from CrossPoint Reader / CrossInk — thanks to their authors for a
+clean, hackable e-reader firmware.

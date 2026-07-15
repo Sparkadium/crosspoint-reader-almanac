@@ -50,6 +50,7 @@ class MoonActivity final : public Activity {
   int radius() const;
   void goSubEarth();
   void drawMoon(int cx, int cy, int R);
+  void drawInfoBar(int barTop);
 
   HalFile mFile;
   uint16_t nFeat_ = 0;
