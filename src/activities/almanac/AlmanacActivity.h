@@ -29,7 +29,7 @@ class AlmanacActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
-  enum Item { DICTIONARY = 0, WIKIPEDIA, FACTBOOK, GLOBE, MOON, SKY, CALCULATOR, CHESS, TSUMEGO, CLOCK, LOCATION, ITEM_COUNT };
+  enum Item { DICTIONARY = 0, WIKIPEDIA, FACTBOOK, GLOBE, MOON, PLANETARIUM, SKY, CALCULATOR, CHESS, TSUMEGO, CLOCK, LOCATION, ITEM_COUNT };
 
   void open(Item item);
   // Read totalEntries from a WCDB header (bytes 8..11) rather than hardcoding

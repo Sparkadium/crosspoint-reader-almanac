@@ -55,12 +55,14 @@ void MoonActivity::onEnter() {
   backHeld = confirmHeld = confirmLong = false;
   backLong_ = false;
   needFull_ = true;
-  {
-    Preferences p;
-    p.begin("almanac", true);
-    chrome_ = p.getUChar("moonui", 1) != 0;
-    p.end();
-  }
+  prefs_.begin("moon");
+  term_ = prefs_.getUChar("term", 1) != 0;
+  features_ = prefs_.getUChar("feat", 1) != 0;
+  grat_ = prefs_.getUChar("grat", 1) != 0;
+  info_ = prefs_.getUChar("info", 1) != 0;
+  cross_ = prefs_.getUChar("cross", 1) != 0;
+  mode_ = MOON;
+  menuSel_ = 0;
   TimeSource::begin();
   timeSet_ = TimeSource::isSet();
 
@@ -89,20 +91,58 @@ void MoonActivity::onEnter() {
 
 void MoonActivity::onExit() {
   Activity::onExit();
+  prefs_.putUChar("term", term_ ? 1 : 0);
+  prefs_.putUChar("feat", features_ ? 1 : 0);
+  prefs_.putUChar("grat", grat_ ? 1 : 0);
+  prefs_.putUChar("info", info_ ? 1 : 0);
+  prefs_.putUChar("cross", cross_ ? 1 : 0);
+  prefs_.end();
   if (mFile) mFile.close();
+}
+
+void MoonActivity::runMenuItem(int item) {
+  switch (item) {
+    case 0: term_ = !term_; break;
+    case 1: features_ = !features_; break;
+    case 2: grat_ = !grat_; break;
+    case 3: info_ = !info_; break;
+    case 4: cross_ = !cross_; break;
+    default: break;
+  }
+  mode_ = MOON;
+  needFull_ = true;  // layer changes leave dither ghosts under FAST_REFRESH
+}
+
+void MoonActivity::drawMenu() {
+  const auto& m = UITheme::getInstance().getMetrics();
+  const int pageW = renderer.getScreenWidth();
+  GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Moon menu");
+  const char* items[6] = {term_ ? "Terminator: on" : "Terminator: off",
+                          features_ ? "Feature circles: on" : "Feature circles: off",
+                          grat_ ? "Graticule: on" : "Graticule: off",
+                          info_ ? "Info text: on" : "Info text: off",
+                          cross_ ? "Crosshair: on" : "Crosshair: off", "Close"};
+  const int lineH = renderer.getLineHeight(HEAD_FONT) + 14;
+  const int top = m.topPadding + m.headerHeight + m.verticalSpacing + 10;
+  const int pad = m.contentSidePadding;
+  for (int i = 0; i < 6; i++) {
+    const bool sel = (i == menuSel_);
+    if (sel) renderer.fillRect(pad - 6, top + i * lineH - 4, pageW - (pad - 6) * 2, lineH - 4, true);
+    renderer.drawText(HEAD_FONT, pad + 4, top + i * lineH, items[i], !sel);
+  }
+  const auto labels = mappedInput.mapLabels("Close", "Choose", "Up", "Down");
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  renderer.displayBuffer();
 }
 
 void MoonActivity::loop() {
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) { backHeld = true; backLong_ = false; }
-  if (backHeld && !backLong_ && mappedInput.isPressed(MappedInputManager::Button::Back) &&
+  if (backHeld && !backLong_ && mode_ == MOON &&
+      mappedInput.isPressed(MappedInputManager::Button::Back) &&
       mappedInput.getHeldTime() > LONG_PRESS_MS) {
-    backLong_ = true;  // hold Back: all chrome on/off
-    chrome_ = !chrome_;
-    Preferences p;
-    p.begin("almanac", false);
-    p.putUChar("moonui", chrome_ ? 1 : 0);
-    p.end();
-    needFull_ = true;  // big field change: clear it properly
+    backLong_ = true;  // hold Back: menu
+    mode_ = MENU_M;
+    menuSel_ = 0;
     requestUpdate();
     return;
   }
@@ -112,7 +152,23 @@ void MoonActivity::loop() {
     backHeld = false;
     backLong_ = false;
     if (wasLong) return;
+    if (mode_ == MENU_M) { mode_ = MOON; needFull_ = true; requestUpdate(); return; }
     finish();
+    return;
+  }
+
+  if (mode_ == MENU_M) {
+    bool moved = false;
+    nav_.onNext([&] { menuSel_ = ButtonNavigator::nextIndex(menuSel_, 6); moved = true; });
+    nav_.onPrevious([&] { menuSel_ = ButtonNavigator::previousIndex(menuSel_, 6); moved = true; });
+    if (moved) { requestUpdate(); return; }
+    if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) confirmHeld = true;
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      if (!confirmHeld) return;
+      confirmHeld = false;
+      runMenuItem(menuSel_);
+      requestUpdate();
+    }
     return;
   }
 
@@ -163,10 +219,10 @@ void MoonActivity::drawMoon(int cx, int cy, int R) {
   const float xl = 0, xr = (float)pageW;
   // chrome hidden: space runs edge to edge; the disc itself stays anchored
   // at the chrome-on layout either way (see render()).
-  const float yt = chrome_ ? (float)(m.topPadding + m.headerHeight + m.verticalSpacing - 6) : 0.0f;
-  const float yb = chrome_ ? (float)(renderer.getScreenHeight() - m.buttonHintsHeight -
-                                     m.verticalSpacing - lineH * 3 - 13)
-                           : (float)(renderer.getScreenHeight() - 1);
+  const float yt = info_ ? (float)(m.topPadding + m.headerHeight + m.verticalSpacing - 6) : 0.0f;
+  const float yb = info_ ? (float)(renderer.getScreenHeight() - m.buttonHintsHeight -
+                                   m.verticalSpacing - lineH * 3 - 13)
+                         : (float)(renderer.getScreenHeight() - 1);
 
   const globe::Basis B = globe::viewBasis(viewLat_, viewLon_);
 
@@ -179,38 +235,29 @@ void MoonActivity::drawMoon(int cx, int cy, int R) {
     const int X0 = std::max(cx - dx, (int)xl), X1 = std::min(cx + dx, (int)xr - 1);
     if (X1 >= X0) renderer.drawLine(X0, Y, X1, Y, false);
   }
-  uint32_t s = 0x5EED5EED;
-  for (int i = 0; i < 110; i++) {
-    s = s * 1664525u + 1013904223u;
-    const int X = (int)((s >> 16) % (uint32_t)pageW);
-    s = s * 1664525u + 1013904223u;
-    const int Y = (int)yt + (int)((s >> 16) % (uint32_t)std::max(1, (int)(yb - yt)));
-    const long ddx = X - cx, ddy = Y - cy;
-    if (ddx * ddx + ddy * ddy <= (long)(R + 3) * (R + 3)) continue;
-    renderer.drawPixel(X, Y, false);
-  }
 
-  // ---- night side from the real sub-solar point ------------------------------
-  {
+  // ---- night side from the real sub-solar point (toggleable) -----------------
+  if (term_) {
     float sw[3], sv[3];
     globe::unitVec(subSLat_, subSLon_, sw);
     for (int i = 0; i < 3; i++)
       sv[i] = B.m[i * 3] * sw[0] + B.m[i * 3 + 1] * sw[1] + B.m[i * 3 + 2] * sw[2];
-    for (int Y = rowTop; Y <= rowBot; Y++) {
+      for (int Y = rowTop; Y <= rowBot; Y++) {
       const float py = (float)(cy - Y) / R;
       float spans[4];
       const int nSpan = globe::nightSpans(sv, py, 0.0f, spans);
-      for (int sp = 0; sp < nSpan; sp++) {
+    for (int sp = 0; sp < nSpan; sp++) {
         int X0 = cx + (int)ceilf(spans[sp * 2] * R), X1 = cx + (int)floorf(spans[sp * 2 + 1] * R);
         X0 = std::max(X0, (int)xl);
         X1 = std::min(X1, (int)xr - 1);
         for (int X = X0; X <= X1; X++)
           if (BAYER[Y & 3][X & 3] < NIGHT_DENSITY) renderer.drawPixel(X, Y, BLACK);
       }
-    }
+      }
   }
 
-  // ---- selenographic graticule, dotted every 30 degrees ----------------------
+  // ---- selenographic graticule, dotted every 30 degrees (toggleable) ---------
+  const bool overlayInk = true;  // black ink on the map
   auto plotDot = [&](float lat, float lon) {
     float v[3];
     globe::unitVec(lat, lon, v);
@@ -220,10 +267,12 @@ void MoonActivity::drawMoon(int cx, int cy, int R) {
     if (sz <= 0) return;
     const int X = cx + (int)(sx * R), Y = cy - (int)(sy * R);
     if (X >= (int)xl && X < (int)xr && Y >= (int)yt && Y < (int)yb)
-      renderer.drawPixel(X, Y, BLACK);
+      renderer.drawPixel(X, Y, overlayInk);
   };
+  if (grat_)
   for (int glat = -60; glat <= 60; glat += 30)
     for (int i = 0; i < 360; i += 3) plotDot((float)glat, (float)i - 180);
+  if (grat_)
   for (int glon = -180; glon < 180; glon += 30)
     for (int i = -87; i <= 87; i += 3) plotDot((float)i, (float)glon);
 
@@ -259,6 +308,7 @@ void MoonActivity::drawMoon(int cx, int cy, int R) {
         strncpy(nearName_, name, sizeof(nearName_) - 1);
       }
 
+      if (!features_) continue;  // naming above still ran; drawing is off
       const int px = (int)(diam / 2.0f / MOON_RADIUS_KM * R);  // km -> pixels
       // level of detail: small features appear as you zoom in
       if (px < 2 && rank >= 2) continue;
@@ -273,12 +323,12 @@ void MoonActivity::drawMoon(int cx, int cy, int R) {
       if (rank == 0) {
         for (int a = 0; a < 360; a += 12)
           renderer.drawPixel(X + (int)(px * cosf(a * 0.0174533f)),
-                             Y + (int)(px * sinf(a * 0.0174533f)), BLACK);
+                             Y + (int)(px * sinf(a * 0.0174533f)), overlayInk);
       } else {
         int cxr = r0, cyr = 0, e = 1 - r0;
         auto putc = [&](int PX, int PY) {
           if (PX >= (int)xl && PX < (int)xr && PY >= (int)yt && PY < (int)yb)
-            renderer.drawPixel(PX, PY, BLACK);
+            renderer.drawPixel(PX, PY, overlayInk);
         };
         while (cxr >= cyr) {
           putc(X + cxr, Y + cyr); putc(X + cyr, Y + cxr);
@@ -293,7 +343,7 @@ void MoonActivity::drawMoon(int cx, int cy, int R) {
     }
   }
 
-  // ---- limb (white against space) + reticle ----------------------------------
+  // ---- limb (white against space) ----------------------------------
   int x = R, y0 = 0, err = 1 - R;
   auto put = [&](int X, int Y) {
     if (X >= (int)xl && X < (int)xr && Y >= (int)yt && Y < (int)yb)
@@ -306,20 +356,30 @@ void MoonActivity::drawMoon(int cx, int cy, int R) {
     if (err < 0) err += 2 * y0 + 1;
     else { x--; err += 2 * (y0 - x) + 1; }
   }
-  renderer.drawLine(cx - 16, cy, cx - 6, cy, 2, BLACK);
-  renderer.drawLine(cx + 6, cy, cx + 16, cy, 2, BLACK);
-  renderer.drawLine(cx, cy - 16, cx, cy - 6, 2, BLACK);
-  renderer.drawLine(cx, cy + 6, cx, cy + 16, 2, BLACK);
+
+  // ---- reticle crosshair (toggleable; the naming works either way) ----------
+  if (cross_) {
+    // black halo under a white core reads on maria, highlands, and photo alike
+    renderer.drawLine(cx - 17, cy, cx - 5, cy, 4, true);
+    renderer.drawLine(cx + 5, cy, cx + 17, cy, 4, true);
+    renderer.drawLine(cx, cy - 17, cx, cy - 5, 4, true);
+    renderer.drawLine(cx, cy + 5, cx, cy + 17, 4, true);
+    renderer.drawLine(cx - 16, cy, cx - 6, cy, 2, false);
+    renderer.drawLine(cx + 6, cy, cx + 16, cy, 2, false);
+    renderer.drawLine(cx, cy - 16, cx, cy - 6, 2, false);
+    renderer.drawLine(cx, cy + 6, cx, cy + 16, 2, false);
+  }
 }
 
 void MoonActivity::render(RenderLock&&) {
+  renderer.clearScreen();
+  if (mode_ == MENU_M) { drawMenu(); return; }
   const auto& m = UITheme::getInstance().getMetrics();
   const int pageW = renderer.getScreenWidth();
   const int pageH = renderer.getScreenHeight();
   const int lineH = renderer.getLineHeight(SMALL);
-  renderer.clearScreen();
 
-  if (chrome_) GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Moon");
+  if (info_) GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Moon");
 
   const int R = radius();
   const int contentTop = m.topPadding + m.headerHeight + m.verticalSpacing;
@@ -328,36 +388,7 @@ void MoonActivity::render(RenderLock&&) {
 
   drawMoon(cx, cy, R);
 
-  drawInfoBar(barTop);
-
-  if (needFull_) {
-    // Ghost scrub, disc only. A whole-panel FULL_REFRESH takes seconds, but
-    // the ghosting lives only under the disc's dither -- so push one frame
-    // with the disc solid black (driving those pixels through a full swing,
-    // which is what actually erases residue), then the real frame. Two FAST
-    // refreshes, and only the disc visibly blinks.
-    needFull_ = false;
-    for (int Y = cy - R; Y <= cy + R; Y++) {
-      const float dy = (float)(Y - cy) / R;
-      const int dx = (int)(R * sqrtf(std::max(0.0f, 1.0f - dy * dy)));
-      if (dx > 0 && Y >= 0 && Y < pageH)
-        renderer.drawLine(std::max(0, cx - dx), Y, std::min(pageW - 1, cx + dx), Y, BLACK);
-    }
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
-    // now the real frame: redraw everything from scratch
-    renderer.clearScreen();
-    if (chrome_) GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Moon");
-    drawMoon(cx, cy, R);
-    drawInfoBar(barTop);
-  }
-  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
-}
-
-void MoonActivity::drawInfoBar(int barTop) {
-  const auto& m = UITheme::getInstance().getMetrics();
-  const int pageW = renderer.getScreenWidth();
-  const int lineH = renderer.getLineHeight(SMALL);
-  if (chrome_) {
+  if (info_) {
   renderer.drawLine(m.contentSidePadding, barTop, pageW - m.contentSidePadding, barTop, BLACK);
   char l1[80], l2[64], l3[64];
   const bool home = fabsf(viewLat_ - subELat_) < 0.5f && fabsf(viewLon_ - subELon_) < 0.5f;
@@ -378,4 +409,6 @@ void MoonActivity::drawInfoBar(int barTop) {
   const auto labels = mappedInput.mapLabels("Back", "Zoom", "Spin", "Spin");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }
+  renderer.displayBuffer(needFull_ ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH);
+  needFull_ = false;
 }

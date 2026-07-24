@@ -17,6 +17,7 @@
 #include "CalcActivity.h"
 #include "GlobeActivity.h"
 #include "MoonActivity.h"
+#include "PlanetariumActivity.h"
 #include "ChessActivity.h"
 #include "ClockActivity.h"
 #include "HalStorage.h"
@@ -33,7 +34,8 @@ constexpr int ROW_FONT = BITTER_16_FONT_ID;
 constexpr int SUB_FONT = SMALL_FONT_ID;
 
 const char* NAMES[] = {"Dictionary", "Wikipedia", "World Factbook", "Globe",  "Moon",
-                       "Sky Chart",  "Calculator", "Chess",  "Tsumego", "Clock",  "Location"};
+                       "Planetarium", "Sky Chart",  "Calculator", "Chess",  "Tsumego",
+                       "Clock",  "Location"};
 
 // Group digits: 69123 -> "69,123"
 std::string withCommas(uint32_t n) {
@@ -85,6 +87,7 @@ void AlmanacActivity::refreshBlurbs() {
   blurbs_[CALCULATOR] = "plot f(x), evaluate expressions";
   blurbs_[GLOBE] = "spin the Earth, live day and night";
   blurbs_[MOON] = "the Moon as it faces you tonight";
+  blurbs_[PLANETARIUM] = "the Sun, planets, and Earth in photographs";
   blurbs_[CLOCK] = "set the date and time";
   blurbs_[LOCATION] = "coordinates, UTC offset, DST rule";
 }
@@ -141,6 +144,9 @@ void AlmanacActivity::open(Item item) {
     case GLOBE:
       status_.clear();
       startActivityForResult(std::make_unique<GlobeActivity>(renderer, mappedInput), onReturn);
+      break;
+    case PLANETARIUM:
+      startActivityForResult(std::make_unique<PlanetariumActivity>(renderer, mappedInput), onReturn);
       break;
     case MOON:
       status_.clear();

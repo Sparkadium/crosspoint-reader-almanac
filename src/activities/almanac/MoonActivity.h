@@ -22,13 +22,19 @@
 // the Moon lives in space).
 //
 // Buttons: D-pad spins | Confirm cycles zoom | hold Confirm flies to the
-//          sub-Earth view | Back exits | hold Back hides/shows all chrome
+//          sub-Earth view | Back exits | hold Back opens the menu (photo
+//          view, terminator, features, graticule, info text, crosshair --
+//          every piece of chrome toggles individually, so the Moon can be a
+//          clean full-bleed photograph or a fully annotated chart)
 //
 #include <cstdint>
+
+#include <Preferences.h>
 
 #include "HalStorage.h"
 #include "activities/Activity.h"
 #include "globe_math.h"
+
 #include "util/ButtonNavigator.h"
 
 class MoonActivity final : public Activity {
@@ -47,10 +53,13 @@ class MoonActivity final : public Activity {
   static constexpr int ZOOM_LEVELS = 3;
   static constexpr float MOON_RADIUS_KM = 1737.4f;
 
+  enum Mode : uint8_t { MOON, MENU_M };
+
   int radius() const;
   void goSubEarth();
   void drawMoon(int cx, int cy, int R);
-  void drawInfoBar(int barTop);
+  void drawMenu();
+  void runMenuItem(int item);
 
   HalFile mFile;
   uint16_t nFeat_ = 0;
@@ -66,10 +75,17 @@ class MoonActivity final : public Activity {
   char nearName_[44] = {0};           // nearest feature to the reticle
   float nearDist_ = 999;
 
-  // One switch for all chrome (header, info bar, hints); hold Back toggles,
-  // NVS-persisted. The disc's anchor never moves -- hiding chrome only lets
-  // the space background run to the panel edges.
-  bool chrome_ = true;
+  // Individually toggleable chrome and layers, NVS-persisted ("moon"
+  // namespace). The disc's anchor never moves -- hiding chrome only lets the
+  // space background run to the panel edges.
+  Mode mode_ = MOON;
+  int menuSel_ = 0;
+  bool term_ = true;      // terminator (Bayer shade on map, solid on photo)
+  bool features_ = true;  // IAU feature circles from /moon.bin
+  bool grat_ = true;      // selenographic graticule
+  bool info_ = true;      // header + info bar + hints
+  bool cross_ = true;     // reticle crosshair
+  Preferences prefs_;
   // e-ink hygiene: the dithered dark side shows ghost text from the previous
   // screen under FAST_REFRESH, so the first frame after entry or a chrome
   // toggle uses a FULL refresh, then fast refreshes for spins.
