@@ -33,7 +33,7 @@ namespace {
 constexpr int ROW_FONT = BITTER_16_FONT_ID;
 constexpr int SUB_FONT = SMALL_FONT_ID;
 
-const char* NAMES[] = {"Dictionary", "Wikipedia", "World Factbook", "Globe",  "Moon",
+const char* NAMES[] = {"Dictionary", "Thesaurus", "Wikipedia", "World Factbook", "Globe",  "Moon",
                        "Planetarium", "Sky Chart",  "Calculator", "Chess",  "Tsumego",
                        "Clock",  "Location"};
 
@@ -80,6 +80,9 @@ void AlmanacActivity::refreshBlurbs() {
   const uint32_t articles = wcdbEntryCount("/wikipedia.cdb");
   blurbs_[WIKIPEDIA] = articles ? withCommas(articles) + " Simple English articles"
                                 : "wikipedia.cdb not on SD card";
+  const uint32_t senses = wcdbEntryCount("/thesaurus.cdb");
+  blurbs_[THESAURUS] = senses ? withCommas(senses) + " headwords"
+                              : "thesaurus.cdb not on SD card";
   blurbs_[SKY] = "stars, moon phase, sun times";
   blurbs_[TSUMEGO] = "Go life-and-death problems";  // count lives in problems.bin
   const uint32_t puzzles = chessPuzzleCount();
@@ -113,6 +116,12 @@ void AlmanacActivity::open(Item item) {
       status_.clear();
       startActivityForResult(
           std::make_unique<DictionaryActivity>(renderer, mappedInput, "/dictionary.cdb", "Dictionary"),
+          onReturn);
+      break;
+    case THESAURUS:
+      status_.clear();
+      startActivityForResult(
+          std::make_unique<DictionaryActivity>(renderer, mappedInput, "/thesaurus.cdb", "Thesaurus"),
           onReturn);
       break;
     case FACTBOOK:

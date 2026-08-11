@@ -4,6 +4,7 @@
 // that opens a submenu of the ported WatchyAlmanac modules:
 //
 //   Dictionary      — WCDB engine, /dictionary.cdb
+//   Thesaurus       — same engine, /thesaurus.cdb
 //   World Factbook  — same engine, /gazetteer.cdb
 //   Wikipedia       — same engine again, /wikipedia.cdb (Simple English leads)
 //   Sky Chart       — 904 stars, moon phase, sunrise/sunset
@@ -29,7 +30,7 @@ class AlmanacActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
-  enum Item { DICTIONARY = 0, WIKIPEDIA, FACTBOOK, GLOBE, MOON, PLANETARIUM, SKY, CALCULATOR, CHESS, TSUMEGO, CLOCK, LOCATION, ITEM_COUNT };
+  enum Item { DICTIONARY = 0, THESAURUS, WIKIPEDIA, FACTBOOK, GLOBE, MOON, PLANETARIUM, SKY, CALCULATOR, CHESS, TSUMEGO, CLOCK, LOCATION, ITEM_COUNT };
 
   void open(Item item);
   // Read totalEntries from a WCDB header (bytes 8..11) rather than hardcoding
