@@ -44,7 +44,11 @@ void IRAM_ATTR __wrap_panic_print_backtrace(const void* frame, int core) {
   }
 
   // Copied from components/esp_system/port/arch/riscv/panic_arch.c
+#if CONFIG_IDF_TARGET_ESP32C3
   uint32_t sp = (uint32_t)((RvExcFrame*)frame)->sp;
+#else
+  uint32_t sp = (uint32_t)((XtExcFrame*)frame)->a1;
+#endif  
   const int per_line = 8;
   int depth = 0;
   for (int x = 0; x < 1024; x += per_line * sizeof(uint32_t)) {
