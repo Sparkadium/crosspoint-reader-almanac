@@ -25,6 +25,27 @@ constexpr int SMALL = SMALL_FONT_ID;
 constexpr bool BLACK = true;
 
 using K = MathEntryActivity;
+
+// Keypad geometry, shared by render() and loop() so a tap lands on the key that
+// was actually drawn. It lived inline in render(); loop() needs the identical
+// numbers, and two copies would drift.
+struct GridGeom {
+  int pad, gridTop, cellW, cellH;
+};
+
+GridGeom computeGrid(const GfxRenderer& r, int rows, int cols) {
+  const auto& m = UITheme::getInstance().getMetrics();
+  GridGeom g;
+  g.pad = m.contentSidePadding;
+  const int boxW = r.getScreenWidth() - g.pad * 2;
+  const int boxY = m.topPadding + m.headerHeight + m.verticalSpacing + 6;
+  const int boxH = r.getLineHeight(EXPR_FONT) + 12;
+  g.gridTop = boxY + boxH + r.getLineHeight(SMALL) + 12;
+  const int gridBottom = r.getScreenHeight() - m.buttonHintsHeight - m.verticalSpacing - 4;
+  g.cellW = boxW / cols;
+  g.cellH = std::max(r.getLineHeight(KEY_FONT) + 14, (gridBottom - g.gridTop) / rows);
+  return g;
+}
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -197,6 +218,29 @@ void MathEntryActivity::loop() {
     return;
   }
 
+  // ---- Touch: tap a key; hold it for the key's alternate -------------------
+  // heldMs comes back with the release, so the long-press alternate needs no
+  // extra state -- unlike the Confirm path, which has to latch confirmLong.
+  {
+    int tx = 0, ty = 0;
+    unsigned long heldMs = 0;
+    if (mappedInput.wasScreenTapped(tx, ty, heldMs)) {
+      const GridGeom g = computeGrid(renderer, ROWS, COLS);
+      const int row = (ty >= g.gridTop) ? (ty - g.gridTop) / g.cellH : -1;
+      const int col = (tx >= g.pad) ? (tx - g.pad) / g.cellW : -1;
+      if (row >= 0 && row < ROWS && col >= 0 && col < COLS) {
+        int n;
+        const Key* ks = rowKeys(row, n);
+        const int i = keyAtCol(row, col);
+        selRow = row;
+        selCol = keyStartCol(row, i);  // leave the button cursor where the finger was
+        activate(ks[i], /*alt=*/heldMs > LONG_PRESS_MS && ks[i].altInsert != nullptr);
+        requestUpdate();
+        return;
+      }
+    }
+  }
+
   // ---- D-pad: move key selection --------------------------------------------
   bool moved = false;
   nav_.onPressAndContinuous({MappedInputManager::Button::Right}, [&] {
@@ -253,7 +297,6 @@ void MathEntryActivity::render(RenderLock&&) {
   renderer.clearScreen();
   const auto& m = UITheme::getInstance().getMetrics();
   const int pageW = renderer.getScreenWidth();
-  const int pageH = renderer.getScreenHeight();
   const int pad = m.contentSidePadding;
 
   GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, title_.c_str());
@@ -283,11 +326,10 @@ void MathEntryActivity::render(RenderLock&&) {
   renderer.drawText(SMALL, pad, boxY + boxH + 4, verdict_.c_str());
 
   // ---- keypad ---------------------------------------------------------------
-  const int gridTop = boxY + boxH + renderer.getLineHeight(SMALL) + 12;
-  const int gridBottom = pageH - m.buttonHintsHeight - m.verticalSpacing - 4;
-  const int cellW = boxW / COLS;
-  const int cellH = std::max(renderer.getLineHeight(KEY_FONT) + 14,
-                             (gridBottom - gridTop) / ROWS);
+  const GridGeom g = computeGrid(renderer, ROWS, COLS);
+  const int gridTop = g.gridTop;
+  const int cellW = g.cellW;
+  const int cellH = g.cellH;
   const int keyFontH = renderer.getLineHeight(KEY_FONT);
 
   for (int r = 0; r < ROWS; r++) {

@@ -17,6 +17,7 @@
 #include "Location.h"
 #include "MappedInputManager.h"
 #include "TimeSource.h"
+#include "TouchGestures.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "FallbackMoment.h"
@@ -72,6 +73,7 @@ void SkyActivity::onEnter() {
     Preferences p;
     p.begin("almanac", true);
     infoUi_ = p.getUChar("skyui", 1) != 0;
+    lines_ = p.getUChar("skylines", 1) != 0;
     p.end();
   }
   requestUpdate();
@@ -96,6 +98,42 @@ void SkyActivity::loop() {
     finish();
     return;
   }
+  // ---- Touch ---------------------------------------------------------------
+  // Hold toggles the chrome (the hold-Confirm branch below needs a physical
+  // Confirm). Swipes mirror the D-pad: horizontal steps 30 minutes, vertical
+  // steps a day. A tap anywhere returns to now, same as Confirm.
+  if (wasLongPressGesture(mappedInput, LONG_PRESS_MS)) {
+    infoUi_ = !infoUi_;
+    Preferences p;
+    p.begin("almanac", false);
+    p.putUChar("skyui", infoUi_ ? 1 : 0);
+    p.end();
+    requestUpdate();
+    return;
+  }
+  switch (mappedInput.wasSwipe()) {
+    case MappedInputManager::SwipeDir::Left: offsetMin_ += 30; requestUpdate(); return;
+    case MappedInputManager::SwipeDir::Right: offsetMin_ -= 30; requestUpdate(); return;
+    case MappedInputManager::SwipeDir::Up: offsetMin_ += 1440; requestUpdate(); return;
+    case MappedInputManager::SwipeDir::Down: offsetMin_ -= 1440; requestUpdate(); return;
+    default: break;
+  }
+  // Tap the sky to toggle the constellation lines. This used to reset the time,
+  // which the Confirm hint already does -- so the tap was redundant and the
+  // lines had no control at all.
+  {
+    int tx = 0, ty = 0;
+    if (wasContentTapped(mappedInput, renderer, tx, ty)) {
+      lines_ = !lines_;
+      Preferences p;
+      p.begin("almanac", false);
+      p.putUChar("skylines", lines_ ? 1 : 0);
+      p.end();
+      requestUpdate();
+      return;
+    }
+  }
+
   bool moved = false;
   if (mappedInput.wasPressed(MappedInputManager::Button::Right)) { offsetMin_ += 30; moved = true; }
   if (mappedInput.wasPressed(MappedInputManager::Button::Left))  { offsetMin_ -= 30; moved = true; }
@@ -195,7 +233,7 @@ void SkyActivity::render(RenderLock&&) {
                        cy_ + (int)lround(radius_ * 0.5 * sin(a * D2R)), WHITE);
 
   // constellation lines (both endpoints above the horizon)
-  for (int i = 0; i < N_LINES; i++) {
+  for (int i = 0; lines_ && i < N_LINES; i++) {
     SkyLine L;
     memcpy_P(&L, &SKY_LINES[i], sizeof(SkyLine));
     int x1, y1, x2, y2;
@@ -256,6 +294,15 @@ void SkyActivity::render(RenderLock&&) {
     const auto labels = mappedInput.mapLabels("Back", "Now", "-30 min", "+30 min");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }
+  // On a panel with no physical Back or Confirm the hints ARE the buttons:
+  // TouchRegistry only registers a hint that was drawn, so hiding them strands
+  // the activity. Draw them regardless of the chrome setting when the only
+  // way out is a tap.
+  if (!infoUi_ && mappedInput.hasTouch()) {
+    const auto labels = mappedInput.mapLabels("Back", "Now", "-30 min", "+30 min");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  }
+
   renderer.displayBuffer();
 }
 

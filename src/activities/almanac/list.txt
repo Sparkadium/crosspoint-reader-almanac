@@ -1,0 +1,45 @@
+ Volume in drive C has no label.
+ Volume Serial Number is 06CA-EAFF
+
+ Directory of C:\Users\DELL\crosspoint-reader\src\activities\almanac
+
+08/14/2026  07:53 AM    <DIR>          .
+08/12/2026  02:14 PM    <DIR>          ..
+08/01/2026  12:08 PM             9,266 AlmanacActivity.cpp
+08/01/2026  12:08 PM             2,019 AlmanacActivity.h
+07/15/2026  10:43 AM            25,893 CalcActivity.cpp
+07/15/2026  10:43 AM             3,790 CalcActivity.h
+07/15/2026  10:43 AM            15,562 calc_engine.h
+07/15/2026  10:43 AM            25,150 ChessActivity.cpp
+07/11/2026  11:05 PM             5,019 ChessActivity.h
+07/15/2026  10:43 AM            10,504 ClockActivity.cpp
+07/11/2026  11:05 PM             1,529 ClockActivity.h
+07/15/2026  10:43 AM             6,874 cty_math.h
+07/15/2026  10:43 AM               801 FallbackMoment.h
+08/12/2026  04:09 PM            29,227 GlobeActivity.cpp
+07/15/2026  05:42 PM             4,080 GlobeActivity.h
+07/15/2026  10:43 AM             5,974 globe_math.h
+08/14/2026  07:53 AM                 0 list.txt
+07/15/2026  10:43 AM             4,814 ListLayout.h
+07/11/2026  11:05 PM             7,092 Location.h
+07/15/2026  10:43 AM            10,362 LocationActivity.cpp
+07/11/2026  11:05 PM             1,784 LocationActivity.h
+07/15/2026  10:43 AM            11,872 MathEntryActivity.cpp
+07/15/2026  10:43 AM             3,162 MathEntryActivity.h
+07/15/2026  05:42 PM            16,415 MoonActivity.cpp
+07/15/2026  05:42 PM             3,797 MoonActivity.h
+07/15/2026  10:43 AM             4,124 moon_math.h
+07/15/2026  05:42 PM            17,815 PlanetariumActivity.cpp
+07/15/2026  05:27 PM             2,812 PlanetariumActivity.h
+07/15/2026  10:43 AM            12,060 SkyActivity.cpp
+07/15/2026  10:43 AM             2,648 SkyActivity.h
+07/11/2026  11:05 PM             9,161 sky_math.h
+07/11/2026  11:05 PM             2,717 sprites.h
+07/15/2026  10:43 AM            13,080 sprites40.h
+07/11/2026  11:05 PM            35,475 stars.h
+07/15/2026  04:31 PM            14,001 tex_math.h
+07/12/2026  12:13 AM             6,818 TimeSource.h
+07/15/2026  10:43 AM            29,657 TsumegoActivity.cpp
+07/11/2026  11:05 PM             5,191 TsumegoActivity.h
+              36 File(s)        360,545 bytes
+               2 Dir(s)  610,094,374,912 bytes free

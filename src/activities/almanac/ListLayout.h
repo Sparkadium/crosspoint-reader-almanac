@@ -19,6 +19,10 @@
 #include <GfxRenderer.h>
 
 #include <algorithm>
+#include <cstdint>
+
+#include "MappedInputManager.h"
+#include "util/ButtonNavigator.h"
 
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -57,24 +61,13 @@ inline ListLayout computeListLayout(const GfxRenderer& r, int itemCount, int sel
   L.bottom = r.getScreenHeight() - m.buttonHintsHeight - m.verticalSpacing - L.subLine - 8;
   const int avail = std::max(1, L.bottom - L.top);
 
-  // The OMIT_*_FONT build flags strip font DATA from flash while fontIds.h
-  // still defines every ID, so an unguarded ladder can pick a font that draws
-  // nothing (the xlarge env omits the 10/12/14px reading sizes -- the exact
-  // rungs this ladder descends through once a list grows past what 16px
-  // fits). Guard each rung at compile time, and skip any font the renderer
-  // reports as unregistered at runtime as a second line of defence. UI_12 is
-  // a UI font, present in every variant, and terminates the ladder.
-  static const int FONTS[] = {
-#ifndef OMIT_LARGE_FONT
-      BITTER_16_FONT_ID,
-#endif
-#ifndef OMIT_MEDIUM_FONT
-      BITTER_14_FONT_ID,
-#endif
-#ifndef OMIT_SMALL_FONT
-      BITTER_12_FONT_ID,
-#endif
-      UI_12_FONT_ID};
+  // fontIds.h defines every ID, but only fonts whose DATA is compiled in draw
+  // anything. CrossInk 1.5.0 fixed the built-in reading fonts at 10/12/14/16pt
+  // (lib/EpdFont/builtinFonts/all.h); Bitter 18/20 ship as SD-card fonts only.
+  // The runtime getLineHeight() check below is the real guard -- it also covers
+  // SD fonts that were installed and then removed. UI_12 is a UI font, always
+  // present, and terminates the ladder.
+  static const int FONTS[] = {BITTER_16_FONT_ID, BITTER_14_FONT_ID, BITTER_12_FONT_ID, UI_12_FONT_ID};
   constexpr int N = (int)(sizeof(FONTS) / sizeof(FONTS[0]));
 
   // Prefer the largest font that shows every row. Failing that, scroll -- do
@@ -118,4 +111,60 @@ inline ListLayout computeListLayout(const GfxRenderer& r, int itemCount, int sel
     if (L.firstVisible > itemCount - L.rowsPerPage) L.firstVisible = itemCount - L.rowsPerPage;
   }
   return L;
+}
+
+// --- Row touch -------------------------------------------------------------
+// Tap-a-row for any list built on ListLayout. Geometry only -- no TouchRegistry
+// registration is needed, and on button-only builds MappedInputManager::rowTouch
+// is constexpr None, so the whole thing compiles away.
+//
+// Activation is on RELEASE only, deliberately. computeListLayout() recentres
+// firstVisible around the selector, so moving the selector on finger-down
+// scrolls the list mid-gesture and the lift lands on a different item. Leaving
+// the selector alone until release keeps the window fixed for the whole tap.
+//
+// Call from loop() with the SAME ListLayout render() will compute:
+//   ListLayout L = computeListLayout(renderer, ITEM_COUNT, selector_, true);
+//   if (listRowTouch(mappedInput, L, ITEM_COUNT, selector_)) {
+//     open(static_cast<Item>(selector_));
+//     return;
+//   }
+//
+// Returns true when a row was activated; selector is updated to that row.
+inline bool listRowTouch(const MappedInputManager& mappedInput, const ListLayout& L, int itemCount, int& selector) {
+  int visibleRow = -1;
+  const auto touch = mappedInput.rowTouch(visibleRow, L.top, L.rowH, L.rowsPerPage,
+                                          /*xStart=*/0, /*xEnd=*/INT32_MAX, /*rowHeight=*/L.boxH);
+  if (touch != MappedInputManager::RowTouch::Tap) return false;
+
+  const int item = L.firstVisible + visibleRow;
+  if (item < 0 || item >= itemCount) return false;  // tap in the scroll gutter
+
+  selector = item;
+  return true;
+}
+
+// --- Swipe paging ----------------------------------------------------------
+// Swipe up pages down the list, swipe down pages up -- the content follows the
+// finger. Note this moves the SELECTOR, not a separate scroll offset: ListLayout
+// derives firstVisible from the selection, so the selection is the scroll
+// position. Paging therefore behaves exactly like holding a physical nav button,
+// just a page per gesture. No-op on lists short enough to fit.
+//
+// Call before listRowTouch() so a swipe never reads as a tap.
+//
+// Returns true when the selection moved; the caller should requestUpdate().
+inline bool listSwipePage(const MappedInputManager& mappedInput, const ListLayout& L, int itemCount,
+                          int& selector) {
+  if (!L.scrolls(itemCount)) return false;
+  switch (mappedInput.wasSwipe()) {
+    case MappedInputManager::SwipeDir::Up:
+      selector = ButtonNavigator::nextPageIndex(selector, itemCount, L.rowsPerPage);
+      return true;
+    case MappedInputManager::SwipeDir::Down:
+      selector = ButtonNavigator::previousPageIndex(selector, itemCount, L.rowsPerPage);
+      return true;
+    default:
+      return false;
+  }
 }

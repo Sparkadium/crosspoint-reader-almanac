@@ -22,6 +22,8 @@
 //
 // Buttons: Back exit | Left -30min | Right +30min | Confirm back to now
 //          Up +1 day | Down -1 day | hold Confirm: hide/show all text
+// Touch:   swipe across = 30 min, swipe up/down = a day, tap the sky =
+//          constellation lines on/off, hold = hide/show all text
 //
 #include <ctime>
 
@@ -56,6 +58,11 @@ class SkyActivity final : public Activity {
   // toggle; kept in NVS. The disc's position and size are computed the same
   // way in both states, so toggling never moves the chart.
   bool infoUi_ = true;
+
+  // Constellation lines, independent of the chrome switch above: a bare star
+  // field is a different chart, not a tidier one. Tap the sky to toggle; kept
+  // in NVS beside skyui.
+  bool lines_ = true;
 
   // Geometry, computed in render() from the real screen size.
   mutable int cx_ = 240, cy_ = 330, radius_ = 210;

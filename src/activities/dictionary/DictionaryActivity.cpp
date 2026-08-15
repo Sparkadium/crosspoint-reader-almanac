@@ -19,38 +19,23 @@
 
 #include "MappedInputManager.h"
 #include "activities/util/KeyboardEntryActivity.h"
+#include "activities/almanac/TouchGestures.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 namespace {
-// Body text sizes. The OMIT_*_FONT build flags strip font DATA from flash
-// while fontIds.h still defines every ID, so an unguarded list offers sizes
-// that draw NOTHING (the xlarge variant omits 12/14pt -- exactly the two
-// that were blank). Each rung is guarded by its flag, so every variant
-// cycles only through sizes it actually carries: tiny gets 12/14/16 and
-// xlarge gets 16/18/20.
-#if defined(BITTER_18_FONT_ID) && !defined(OMIT_XLARGE_FONT)
-constexpr int BODY_FONTS[] = {
-    SMALL_FONT_ID,
-    UI_12_FONT_ID,
-    BITTER_18_FONT_ID,
-};
-constexpr int BODY_PTS[] = {10, 12, 18};
-
-#elif defined(BITTER_16_FONT_ID) && !defined(OMIT_LARGE_FONT)
+// Body text sizes. CrossInk 1.5.0 fixed the built-in reading fonts at
+// 10/12/14/16pt (lib/EpdFont/builtinFonts/all.h). Bitter 18/20 still have
+// headers in the tree but are not compiled in -- they ship as SD-card fonts
+// only. fontIds.h still defines every ID, so naming 18pt compiles fine and
+// then draws nothing at runtime ("Font -1308817601 not found"). The old
+// OMIT_*_FONT size flags this used to switch on no longer exist; only
+// OMIT_EMOJI_FONTS survives.
 constexpr int BODY_FONTS[] = {
     SMALL_FONT_ID,
     UI_12_FONT_ID,
     BITTER_16_FONT_ID,
 };
 constexpr int BODY_PTS[] = {10, 12, 16};
-
-#else
-constexpr int BODY_FONTS[] = {
-    SMALL_FONT_ID,
-    UI_12_FONT_ID,
-};
-constexpr int BODY_PTS[] = {10, 12};
-#endif
 }
 constexpr int FONT_STEPS = (int)(sizeof(BODY_FONTS) / sizeof(BODY_FONTS[0]));
 static_assert(FONT_STEPS > 0, "every body font size was omitted from this build");
@@ -150,7 +135,7 @@ bool WcdbReader::decompressBlock(int idx) {
 
   // Raw DEFLATE (wbits -15): no zlib header, so do NOT call skipZlibHeader().
   InflateReader inf;
-  if (!inf.init(false)) return false;  // one-shot: the whole block is in memory
+  inf.init();  // one-shot: the whole block is in memory
   inf.setSource(compBuf_.data(), b.compSize);
   if (!inf.read(decBuf_.data(), b.rawSize)) return false;
 
@@ -436,6 +421,28 @@ void DictionaryActivity::openSearch() {
 }
 
 void DictionaryActivity::loop() {
+  // Hold anywhere to cycle the body text size. The hold-Back branch below needs
+  // a physical Back button; a touch hint gives press+release with no held state
+  // between them, so isPressed() never sees the hold.
+  // Swipe down for a random entry -- the hold-Confirm that used to do it cannot
+  // fire without a physical Confirm. Up/Down page the text on the hardware
+  // buttons, and left/right step entries via the hints, so a vertical swipe was
+  // the free slot.
+  if (!loadError_ && mappedInput.wasSwipe() == MappedInputManager::SwipeDir::Down) {
+    auto e = dict_.randomEntry();
+    if (e.found) {
+      status_.clear();
+      setEntry(e);
+      requestUpdate();
+    }
+    return;
+  }
+
+  if (!loadError_ && wasLongPressGesture(mappedInput, LONG_PRESS_MS)) {
+    cycleFont();
+    requestUpdate();
+    return;
+  }
   if (loadError_) {
     if (mappedInput.wasPressed(MappedInputManager::Button::Back)) sawBackPress_ = true;
     if (mappedInput.wasReleased(MappedInputManager::Button::Back) && sawBackPress_) finish();
@@ -512,17 +519,39 @@ void DictionaryActivity::loop() {
   nav_.onContinuous({MappedInputManager::Button::Left}, goPrev);
 
   const int perPage = bodyLinesPerPage();
-  if (mappedInput.wasPressed(MappedInputManager::Button::Down)) {
+  auto pageForward = [&] {
     if ((page_ + 1) * perPage < (int)wrapped_.size()) {
       page_++;
       moved = true;
     }
-  }
-  if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
+  };
+  auto pageBack = [&] {
     if (page_ > 0) {
       page_--;
       moved = true;
     }
+  };
+
+  // Where the panel has a touchscreen, the two hardware buttons are worth more
+  // on entry navigation than on paging. Left/Right are front buttons the X4 Pro
+  // does not have -- they only arrive as hint taps -- so prev/next was the one
+  // frequent action with no physical control. Paging moves to horizontal swipes,
+  // which is the page-turn idiom anyway and is something buttons cannot express
+  // as naturally. On button-only devices nothing changes: Left/Right already do
+  // prev/next there, so Up/Down stay on paging.
+  if (mappedInput.hasTouch()) {
+    nav_.onPress({MappedInputManager::Button::Down}, goNext);
+    nav_.onPress({MappedInputManager::Button::Up}, goPrev);
+    nav_.onContinuous({MappedInputManager::Button::Down}, goNext);
+    nav_.onContinuous({MappedInputManager::Button::Up}, goPrev);
+    switch (mappedInput.wasSwipe()) {
+      case MappedInputManager::SwipeDir::Left: pageForward(); break;
+      case MappedInputManager::SwipeDir::Right: pageBack(); break;
+      default: break;
+    }
+  } else {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Down)) pageForward();
+    if (mappedInput.wasPressed(MappedInputManager::Button::Up)) pageBack();
   }
 
   if (moved) requestUpdate();

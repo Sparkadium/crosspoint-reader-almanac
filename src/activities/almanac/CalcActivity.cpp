@@ -297,6 +297,20 @@ void CalcActivity::loop() {
   if (mode == MENU || mode == FUNCS) {
     const int count = (mode == MENU) ? MENU_COUNT : SLOTS;
     int& sel = (mode == MENU) ? menuSel : funcSel;
+
+    // Touch: same gestures as the Almanac list. sel is a reference, so the
+    // helpers update menuSel / funcSel directly.
+    {
+      const ListLayout L = computeListLayout(renderer, count, sel, /*wantBlurb=*/true);
+      if (listSwipePage(mappedInput, L, count, sel)) { requestUpdate(); return; }
+      if (listRowTouch(mappedInput, L, count, sel)) {
+        confirmHeld = false;  // no Confirm press/release pair accompanies a tap
+        if (mode == MENU) runMenuItem(menuSel);
+        else editSlot(funcSel);
+        requestUpdate();
+        return;
+      }
+    }
     bool moved = false;
     nav_.onNext([&] { sel = ButtonNavigator::nextIndex(sel, count); moved = true; });
     nav_.onPrevious([&] { sel = ButtonNavigator::previousIndex(sel, count); moved = true; });
@@ -316,6 +330,41 @@ void CalcActivity::loop() {
   bool moved = false;
   int px, py, pw, ph;
   plotArea(px, py, pw, ph);
+
+  // ---- Touch on the graph --------------------------------------------------
+  // A flick pans by its actual delta rather than a fixed sixth, so the content
+  // tracks the finger. In Trace, a tap drops the cursor straight on the column
+  // you touched -- the one interaction that is painful with two buttons.
+  {
+    // Hold anywhere to open the menu. The hint-tap path gives a press and a
+    // release with no held state between them, so isPressed() never sees a hold
+    // and the Confirm/Back long-press branches below are unreachable without a
+    // physical button. This uses the SDK's own mid-contact long-press instead;
+    // suppressNextTouchTap() stops the release from also cycling the mode.
+    // Everything the long presses used to reach lives in the menu (Functions is
+    // its first item), so one gesture restores the lot.
+    int lx = 0, ly = 0;
+    if (mappedInput.isScreenTouchLongPress(lx, ly, LONG_PRESS_MS)) {
+      mappedInput.suppressNextTouchTap();
+      openMenu();
+      requestUpdate();
+      return;
+    }
+    MappedInputManager::SwipeDir dir = MappedInputManager::SwipeDir::None;
+    int sx = 0, sy = 0, ex = 0, ey = 0;
+    if (mappedInput.wasSwipeWithPoints(dir, sx, sy, ex, ey)) {
+      pan(-(float)(ex - sx) / std::max(1, pw), (float)(ey - sy) / std::max(1, ph));
+      requestUpdate();
+      return;
+    }
+    int tx = 0, ty = 0;
+    if (mode == TRACE && mappedInput.wasScreenTapped(tx, ty) && tx >= px && tx < px + pw && ty >= py &&
+        ty < py + ph) {
+      traceCol = std::min(std::max(tx - px, 0), pw - 1);
+      requestUpdate();
+      return;
+    }
+  }
 
   switch (mode) {
     case PAN:

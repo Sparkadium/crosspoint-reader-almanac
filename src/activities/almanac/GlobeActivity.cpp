@@ -19,6 +19,7 @@
 #include "FallbackMoment.h"
 #include "cty_math.h"
 #include "TimeSource.h"
+#include "TouchGestures.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "sky_math.h"
@@ -31,15 +32,14 @@ constexpr int SMALL = SMALL_FONT_ID;
 // reader font this tree actually ships -- fontIds.h entries are #defines, so
 // this resolves to Bitter on CrossInk, NotoSerif upstream, and falls back to
 // the UI font on anything else rather than failing to build.
-// NOTE: the IDs are ALWAYS #defined; it is the font DATA the OMIT_*_FONT
-// flags remove. So each probe must also check the matching OMIT flag, or a
-// tiny-variant build would "cycle" to a font that draws nothing.
-#if defined(BITTER_18_FONT_ID) && !defined(OMIT_XLARGE_FONT)
-constexpr int FACT_LARGE = BITTER_18_FONT_ID;
-#elif defined(BITTER_16_FONT_ID) && !defined(OMIT_LARGE_FONT)
+// NOTE: the IDs are ALWAYS #defined; it is the font DATA that decides whether
+// anything draws. CrossInk 1.5.0 fixed the built-in reading fonts at
+// 10/12/14/16pt (lib/EpdFont/builtinFonts/all.h) -- Bitter 18/20 keep their
+// headers but are no longer compiled in, so naming 18pt here renders nothing
+// ("Font -1308817601 not found"). The OMIT_*_FONT size flags this used to
+// probe no longer exist; only OMIT_EMOJI_FONTS survives.
+#if defined(BITTER_16_FONT_ID)
 constexpr int FACT_LARGE = BITTER_16_FONT_ID;
-#elif defined(NOTOSERIF_18_FONT_ID)
-constexpr int FACT_LARGE = NOTOSERIF_18_FONT_ID;
 #elif defined(NOTOSERIF_16_FONT_ID)
 constexpr int FACT_LARGE = NOTOSERIF_16_FONT_ID;
 #else
@@ -279,6 +279,15 @@ void GlobeActivity::openEntry() {
 }
 
 void GlobeActivity::loop() {
+  // Hold anywhere to open the menu: the hold-Back branch below needs a physical
+  // Back button, which this panel does not have.
+  if (mode_ == GLOBE && wasLongPressGesture(mappedInput, LONG_PRESS_MS)) {
+    mode_ = MENU_M;
+    menuSel_ = 0;
+    requestUpdate();
+    return;
+  }
+
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) { backHeld = true; backLong = false; }
   if (backHeld && !backLong && mode_ == GLOBE && mappedInput.isPressed(MappedInputManager::Button::Back) &&
       mappedInput.getHeldTime() > LONG_PRESS_MS) {
@@ -301,6 +310,28 @@ void GlobeActivity::loop() {
   // ---- find list -------------------------------------------------------------
   if (mode_ == FIND) {
     const int count = findCount_;
+    // Touch: swipe pages the list, tap flies to a country. drawFind() uses
+    // ListLayout, so the shared helpers apply directly.
+    {
+      const ListLayout L = computeListLayout(renderer, count, findSel_, /*wantBlurb=*/false);
+      if (listSwipePage(mappedInput, L, count, findSel_)) { requestUpdate(); return; }
+      if (listRowTouch(mappedInput, L, count, findSel_)) {
+        confirmHeld = false;  // no Confirm press/release pair accompanies a tap
+        cty::CountryInfo sel{};
+        cty::forEachCountry(ctyFile_, [&](int idx, const cty::CountryInfo& ci) {
+          if (idx == findSel_) sel = ci;
+        });
+        viewLat_ = sel.flyLat;
+        viewLon_ = sel.flyLon;
+        status_.clear();
+        haveCountry_ = true;
+        strncpy(countryKey_, sel.key, sizeof(countryKey_) - 1);
+        strncpy(countryName_, sel.name, sizeof(countryName_) - 1);
+        mode_ = GLOBE;
+        requestUpdate();
+        return;
+      }
+    }
     bool moved = false;
     nav_.onPressAndContinuous({MappedInputManager::Button::Down},
                               [&] { findSel_ = (findSel_ + 1) % count; moved = true; });
@@ -350,6 +381,19 @@ void GlobeActivity::loop() {
 
   // ---- menu ------------------------------------------------------------------
   if (mode_ == MENU_M) {
+    // Tap a menu row (these menus predate ListLayout; the hit test mirrors
+    // drawMenu()'s fixed-pitch arithmetic).
+    {
+      const auto& mm = UITheme::getInstance().getMetrics();
+      const int menuTop = mm.topPadding + mm.headerHeight + mm.verticalSpacing + 10;
+      const int hit = simpleMenuTap(mappedInput, menuTop, renderer.getLineHeight(UI_12_FONT_ID) + 14, 8);
+      if (hit >= 0) {
+        menuSel_ = hit;
+        runMenuItem(hit);
+        requestUpdate();
+        return;
+      }
+    }
     bool moved = false;
     nav_.onNext([&] { menuSel_ = ButtonNavigator::nextIndex(menuSel_, 8); moved = true; });
     nav_.onPrevious([&] { menuSel_ = ButtonNavigator::previousIndex(menuSel_, 8); moved = true; });
@@ -383,6 +427,14 @@ void GlobeActivity::loop() {
 
   // Spin: pressing RIGHT flies you east, so the globe rolls west under the
   // reticle. Step shrinks with zoom so a press is a similar screen distance.
+  // Drag the planet under the reticle.
+  if (spinDragToView(mappedInput, radius(), viewLat_, viewLon_)) {
+    status_.clear();
+    resolveCountry();
+    requestUpdate();
+    return;
+  }
+
   const float step = SPIN_DEG / (zoom_ + 1);
   bool moved = false;
   nav_.onPressAndContinuous({MappedInputManager::Button::Right}, [&] {
@@ -404,6 +456,20 @@ void GlobeActivity::loop() {
     moved = true;
   });
   if (moved) { status_.clear(); resolveCountry(); requestUpdate(); return; }
+
+  // Tap the globe to open the Factbook entry under the reticle. That is the hold
+  // below, which needs a physical Confirm this panel does not have -- and a tap
+  // on the thing you want to read about is the more obvious gesture anyway.
+  // Swipes are spent on spinning, so tap is the free slot here.
+  {
+    int tx = 0, ty = 0;
+    if (wasContentTapped(mappedInput, renderer, tx, ty)) {
+      confirmHeld = false;
+      openEntry();
+      requestUpdate();
+      return;
+    }
+  }
 
   // Confirm: tap cycles zoom, hold opens the Factbook entry under the reticle.
   if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) { confirmHeld = true; confirmLong = false; }
@@ -691,8 +757,12 @@ void GlobeActivity::render(RenderLock&&) {
     renderer.drawCenteredText(SMALL, barTop - lineH - 4, status_.c_str(), ink);
   }
 
-  if (!space_) {
-    const auto labels = mappedInput.mapLabels("Back", haveCountry_ ? "Facts" : "Facts", "Spin", "Spin");
+  // On a panel with no physical Back or Confirm the hints ARE the buttons:
+  // TouchRegistry only registers a hint that was drawn, so hiding them strands
+  // the activity. Draw them regardless of the chrome setting when the only
+  // way out is a tap.
+  if (!space_ || mappedInput.hasTouch()) {
+    const auto labels = mappedInput.mapLabels("Back", "Facts", "Spin", "Spin");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }
   renderer.displayBuffer();

@@ -18,6 +18,7 @@
 #include "FallbackMoment.h"
 #include "MappedInputManager.h"
 #include "TimeSource.h"
+#include "TouchGestures.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "moon_math.h"
@@ -136,6 +137,15 @@ void MoonActivity::drawMenu() {
 }
 
 void MoonActivity::loop() {
+  // Hold anywhere to open the menu (no physical Back on this panel).
+  if (mode_ == MOON && wasLongPressGesture(mappedInput, LONG_PRESS_MS)) {
+    mode_ = MENU_M;
+    menuSel_ = 0;
+    requestUpdate();
+    return;
+  }
+
+
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) { backHeld = true; backLong_ = false; }
   if (backHeld && !backLong_ && mode_ == MOON &&
       mappedInput.isPressed(MappedInputManager::Button::Back) &&
@@ -157,7 +167,41 @@ void MoonActivity::loop() {
     return;
   }
 
+  // Touch AFTER the Back handler: wasScreenTapped() consumes the tap, and the
+  // Back hint is delivered as a tap, so reading it first swallows the only way
+  // out of the activity on a panel with no physical Back.
+  // Tap the Moon to fly back to the sub-Earth view (the hold-Confirm that used
+  // to do it needs a physical Confirm). Swipes spin, so tap is the free slot.
+  if (mode_ == MOON) {
+    int tx = 0, ty = 0;
+    if (wasContentTapped(mappedInput, renderer, tx, ty)) {
+      confirmHeld = false;
+      goSubEarth();
+      requestUpdate();
+      return;
+    }
+  }
+
+  // Drag the Moon under the reticle.
+  if (mode_ == MOON && spinDragToView(mappedInput, radius(), viewLat_, viewLon_)) {
+    requestUpdate();
+    return;
+  }
+
   if (mode_ == MENU_M) {
+    // Tap a menu row (these menus predate ListLayout; the hit test mirrors
+    // drawMenu()'s fixed-pitch arithmetic).
+    {
+      const auto& mm = UITheme::getInstance().getMetrics();
+      const int menuTop = mm.topPadding + mm.headerHeight + mm.verticalSpacing + 10;
+      const int hit = simpleMenuTap(mappedInput, menuTop, renderer.getLineHeight(HEAD_FONT) + 14, 6);
+      if (hit >= 0) {
+        menuSel_ = hit;
+        runMenuItem(hit);
+        requestUpdate();
+        return;
+      }
+    }
     bool moved = false;
     nav_.onNext([&] { menuSel_ = ButtonNavigator::nextIndex(menuSel_, 6); moved = true; });
     nav_.onPrevious([&] { menuSel_ = ButtonNavigator::previousIndex(menuSel_, 6); moved = true; });
@@ -409,6 +453,15 @@ void MoonActivity::render(RenderLock&&) {
   const auto labels = mappedInput.mapLabels("Back", "Zoom", "Spin", "Spin");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }
+  // On a panel with no physical Back or Confirm the hints ARE the buttons:
+  // TouchRegistry only registers a hint that was drawn, so hiding them strands
+  // the activity. Draw them regardless of the chrome setting when the only
+  // way out is a tap.
+  if (!info_ && mappedInput.hasTouch()) {
+    const auto labels = mappedInput.mapLabels("Back", "Zoom", "Spin", "Spin");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  }
+
   renderer.displayBuffer(needFull_ ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH);
   needFull_ = false;
 }

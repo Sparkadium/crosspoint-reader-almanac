@@ -22,6 +22,26 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 namespace {
+// Board geometry, shared by drawBoard() and loop(). It lived inline in
+// drawBoard(); a tap has to resolve to the intersection that was actually
+// drawn, and two copies would drift.
+struct GoGeom {
+  int x0, y0, pitch;
+};
+
+GoGeom computeGoGeom(const GfxRenderer& r, int W, int H) {
+  const auto& m = UITheme::getInstance().getMetrics();
+  const int pageW = r.getScreenWidth();
+  const int top = m.topPadding + m.headerHeight + m.verticalSpacing + 10;
+  const int bottom = r.getScreenHeight() - m.buttonHintsHeight - m.verticalSpacing - 40;
+  const int availW = pageW - m.contentSidePadding * 2;
+  const int availH = bottom - top;
+  GoGeom g;
+  g.pitch = std::min(56, std::min(availW / std::max(W, 1), availH / std::max(H, 1)));
+  g.x0 = (pageW - (W - 1) * g.pitch) / 2;
+  g.y0 = top + (availH - (H - 1) * g.pitch) / 2;
+  return g;
+}
 constexpr int TITLE_FONT = UI_12_FONT_ID;
 constexpr int SMALL = SMALL_FONT_ID;
 constexpr int ROW_FONT = BITTER_16_FONT_ID;
@@ -434,6 +454,21 @@ void TsumegoActivity::loop() {
     return;  // ignore input mid-playback
   }
 
+  // ---- Touch: hold anywhere to open the menu -------------------------------
+  // A hint tap gives press+release with no held state between, so isPressed()
+  // never sees a hold and the hold-Back branch below cannot fire on a device
+  // with no physical Back. This uses the SDK long-press classifier instead;
+  // suppressNextTouchTap() keeps the release from also landing on the board.
+  if (mode < MENU) {
+    int lx = 0, ly = 0;
+    if (mappedInput.isScreenTouchLongPress(lx, ly, LONG_PRESS_MS)) {
+      mappedInput.suppressNextTouchTap();
+      openMenu();
+      requestUpdate();
+      return;
+    }
+  }
+
   // ---- Back: hold = menu, tap = undo / exit -------------------------------
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) { backHeld = true; backLong = false; }
   if (backHeld && !backLong && mode < MENU && mappedInput.isPressed(MappedInputManager::Button::Back) &&
@@ -475,6 +510,20 @@ void TsumegoActivity::loop() {
   if (mode == MENU || mode == SETMENU) {
     const int count = (mode == MENU) ? MENU_COUNT : nSets;
     int& sel = (mode == MENU) ? menuSel : setSel;
+
+    // Touch: same gestures as every other ListLayout screen. sel is a
+    // reference, so the helpers update menuSel / setSel directly.
+    {
+      const ListLayout L = computeListLayout(renderer, count, sel, /*wantBlurb=*/mode == SETMENU);
+      if (listSwipePage(mappedInput, L, count, sel)) { requestUpdate(); return; }
+      if (listRowTouch(mappedInput, L, count, sel)) {
+        confirmHeld = false;  // no Confirm press/release pair accompanies a tap
+        if (mode == MENU) runMenuItem(menuSel);
+        else { jumpToSet((uint8_t)setSel); mode = PLAYING; }
+        requestUpdate();
+        return;
+      }
+    }
     bool moved = false;
     nav_.onNext([&] { sel = ButtonNavigator::nextIndex(sel, count); moved = true; });
     nav_.onPrevious([&] { sel = ButtonNavigator::previousIndex(sel, count); moved = true; });
@@ -526,6 +575,60 @@ void TsumegoActivity::loop() {
   nav_.onPressAndContinuous({MappedInputManager::Button::Down}, [&] { moveCursor(0, 1); moved = true; });
   nav_.onPressAndContinuous({MappedInputManager::Button::Up}, [&] { moveCursor(0, -1); moved = true; });
   if (moved && mode == PLAYING) { requestUpdate(); return; }
+
+  // Swipe between problems once this one is finished. Left is "next", the way
+  // a page turns; right steps back one. Restricted to the done states on
+  // purpose -- a swipe mid-solve would throw the attempt away.
+  if (mode == SOLVED || mode == REVEALED) {
+    switch (mappedInput.wasSwipe()) {
+      case MappedInputManager::SwipeDir::Left:
+        jumpNextUnsolved();
+        requestUpdate();
+        return;
+      case MappedInputManager::SwipeDir::Right:
+        jumpTo(probIdx > 0 ? static_cast<uint16_t>(probIdx - 1)
+                           : static_cast<uint16_t>(problemCount - 1));
+        requestUpdate();
+        return;
+      default:
+        break;
+    }
+  }
+
+  // Swipe up to pass. The hold-Confirm that used to do it cannot fire without a
+  // physical Confirm. Only while playing; the finished states use left/right to
+  // change problem.
+  if (mode == PLAYING && mappedInput.wasSwipe() == MappedInputManager::SwipeDir::Up) {
+    userMove(PASS_POS);
+    requestUpdate();
+    return;
+  }
+
+  // Tap an intersection. Two-phase on purpose: the first tap only moves the
+  // cursor, a second tap on the SAME point places the stone. userMove() has no
+  // take-back beyond undoTurn(), and finger resolution on a 19-wide board would
+  // otherwise misdrop. Same rhythm as the chess board.
+  if (mode == PLAYING) {
+    int tx = 0, ty = 0;
+    if (mappedInput.wasScreenTapped(tx, ty)) {
+      const GoGeom g = computeGoGeom(renderer, W, H);
+      const int half = g.pitch / 2;
+      const int dx = tx - g.x0 + half;
+      const int dy = ty - g.y0 + half;
+      const int c = (dx >= 0) ? dx / g.pitch : -1;  // nearest intersection, not cell
+      const int r = (dy >= 0) ? dy / g.pitch : -1;
+      if (c >= 0 && c < W && r >= 0 && r < H) {
+        const uint8_t pos = static_cast<uint8_t>(r * W + c);
+        if (cursor != pos) {
+          cursor = pos;  // first tap: aim
+        } else {
+          userMove(pos);  // second tap on the same point: commit
+        }
+        requestUpdate();
+        return;
+      }
+    }
+  }
 
   // Confirm: tap = place, hold = pass. In SOLVED, tap advances.
   if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) { confirmHeld = true; confirmLong = false; }
@@ -619,18 +722,10 @@ void TsumegoActivity::render(RenderLock&&) {
 }
 
 void TsumegoActivity::drawBoard() {
-  const auto& m = UITheme::getInstance().getMetrics();
-  const int pageW = renderer.getScreenWidth();
-  const int pageH = renderer.getScreenHeight();
-
-  const int top = m.topPadding + m.headerHeight + m.verticalSpacing + 10;
-  const int bottom = pageH - m.buttonHintsHeight - m.verticalSpacing - 40;
-  const int availW = pageW - m.contentSidePadding * 2;
-  const int availH = bottom - top;
-
-  const int pitch = std::min(56, std::min(availW / std::max<int>(W, 1), availH / std::max<int>(H, 1)));
-  const int x0 = (pageW - (W - 1) * pitch) / 2;
-  const int y0 = top + (availH - (H - 1) * pitch) / 2;
+  const GoGeom g = computeGoGeom(renderer, W, H);
+  const int pitch = g.pitch;
+  const int x0 = g.x0;
+  const int y0 = g.y0;
   const int ext = pitch / 2;  // continuation stub on open sides
 
   for (uint8_t c = 0; c < W; c++) {

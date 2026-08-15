@@ -24,6 +24,25 @@
 #include "sprites.h"    // SPR (=20), SPR_FILL[6], SPR_LINE[6]      -- small squares
 #include "sprites40.h"  // SPR40 (=40), SPR40_FILL/LINE/HALO[6]   -- native, no scaling
 namespace {
+// Board geometry, shared by drawBoard() and loop(). It lived inline in
+// drawBoard(); a tap has to resolve to the square that was actually drawn, and
+// two copies would drift.
+struct BoardGeom {
+  int x0, y0, sq;
+};
+
+BoardGeom computeBoardGeom(const GfxRenderer& r) {
+  const auto& m = UITheme::getInstance().getMetrics();
+  const int pageW = r.getScreenWidth();
+  const int top = m.topPadding + m.headerHeight + m.verticalSpacing + 8;
+  const int bottom = r.getScreenHeight() - m.buttonHintsHeight - m.verticalSpacing - 44;
+  const int avail = std::min(pageW - m.contentSidePadding * 2, bottom - top);
+  BoardGeom g;
+  g.sq = avail / 8;
+  g.x0 = (pageW - g.sq * 8) / 2;
+  g.y0 = top + ((bottom - top) - g.sq * 8) / 2;
+  return g;
+}
 constexpr int TITLE_FONT = UI_12_FONT_ID;
 constexpr int SMALL = SMALL_FONT_ID;
 constexpr int ROW_FONT = BITTER_16_FONT_ID;
@@ -344,6 +363,21 @@ void ChessActivity::loop() {
     return;
   }
 
+  // ---- Touch: hold anywhere to open the menu -------------------------------
+  // A hint tap gives press+release with no held state between, so isPressed()
+  // never sees a hold and the hold-Back branch below cannot fire on a device
+  // with no physical Back. This uses the SDK long-press classifier instead;
+  // suppressNextTouchTap() keeps the release from also landing on the board.
+  if (mode < MENU) {
+    int lx = 0, ly = 0;
+    if (mappedInput.isScreenTouchLongPress(lx, ly, LONG_PRESS_MS)) {
+      mappedInput.suppressNextTouchTap();
+      openMenu();
+      requestUpdate();
+      return;
+    }
+  }
+
   // ---- Back: hold = menu; tap = deselect / undo / exit ---------------------
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) { backHeld = true; backLong = false; }
   if (backHeld && !backLong && mode < MENU && mappedInput.isPressed(MappedInputManager::Button::Back) &&
@@ -376,6 +410,20 @@ void ChessActivity::loop() {
   if (mode == MENU || mode == SETMENU) {
     const int count = (mode == MENU) ? MENU_COUNT : nSets;
     int& sel = (mode == MENU) ? menuSel : setSel;
+
+    // Touch: same gestures as every other ListLayout screen. sel is a
+    // reference, so the helpers update menuSel / setSel directly.
+    {
+      const ListLayout L = computeListLayout(renderer, count, sel, /*wantBlurb=*/mode == SETMENU);
+      if (listSwipePage(mappedInput, L, count, sel)) { requestUpdate(); return; }
+      if (listRowTouch(mappedInput, L, count, sel)) {
+        confirmHeld = false;  // no Confirm press/release pair accompanies a tap
+        if (mode == MENU) runMenuItem(menuSel);
+        else { jumpToSet((uint8_t)setSel); mode = PLAYING; }
+        requestUpdate();
+        return;
+      }
+    }
     bool moved = false;
     nav_.onNext([&] { sel = ButtonNavigator::nextIndex(sel, count); moved = true; });
     nav_.onPrevious([&] { sel = ButtonNavigator::previousIndex(sel, count); moved = true; });
@@ -426,6 +474,44 @@ void ChessActivity::loop() {
   nav_.onPressAndContinuous({MappedInputManager::Button::Up}, [&] { moveCursor(0, -1); moved = true; });
   if (moved && mode == PLAYING) { requestUpdate(); return; }
 
+  // Swipe between problems once this one is finished. Left is "next", the way
+  // a page turns; right steps back one. Restricted to the done states on
+  // purpose -- a swipe mid-solve would throw the attempt away.
+  if (mode == SOLVED || mode == REVEALED) {
+    switch (mappedInput.wasSwipe()) {
+      case MappedInputManager::SwipeDir::Left:
+        jumpNextUnsolved();
+        requestUpdate();
+        return;
+      case MappedInputManager::SwipeDir::Right:
+        jumpTo(probIdx > 0 ? static_cast<uint16_t>(probIdx - 1)
+                           : static_cast<uint16_t>(chCount - 1));
+        requestUpdate();
+        return;
+      default:
+        break;
+    }
+  }
+
+  // Tap a square. chessConfirm() already implements the two-phase rule against
+  // ccursor -- tapping an own piece selects it, tapping again elsewhere plays --
+  // so moving the cursor to the tap and reusing it keeps touch and buttons
+  // behaving identically.
+  if (mode == PLAYING) {
+    int tx = 0, ty = 0;
+    if (mappedInput.wasScreenTapped(tx, ty)) {
+      const BoardGeom g = computeBoardGeom(renderer);
+      const int col = (tx >= g.x0) ? (tx - g.x0) / g.sq : -1;
+      const int row = (ty >= g.y0) ? (ty - g.y0) / g.sq : -1;
+      if (col >= 0 && col < 8 && row >= 0 && row < 8) {
+        ccursor = static_cast<uint8_t>(row * 8 + col);
+        chessConfirm();
+        requestUpdate();
+        return;
+      }
+    }
+  }
+
   if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) confirmHeld = true;
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (!confirmHeld) return;  // leftover from a child
@@ -468,16 +554,10 @@ void ChessActivity::blitMask40(int x, int y, const uint64_t* mask, bool state) c
 }
 
 void ChessActivity::drawBoard() {
-  const auto& m = UITheme::getInstance().getMetrics();
-  const int pageW = renderer.getScreenWidth();
-  const int pageH = renderer.getScreenHeight();
-
-  const int top = m.topPadding + m.headerHeight + m.verticalSpacing + 8;
-  const int bottom = pageH - m.buttonHintsHeight - m.verticalSpacing - 44;
-  const int avail = std::min(pageW - m.contentSidePadding * 2, bottom - top);
-  const int SQ = avail / 8;
-  const int X0 = (pageW - SQ * 8) / 2;
-  const int Y0 = top + ((bottom - top) - SQ * 8) / 2;
+  const BoardGeom g = computeBoardGeom(renderer);
+  const int SQ = g.sq;
+  const int X0 = g.x0;
+  const int Y0 = g.y0;
 
   // Use the native 40px art whenever a square can hold it; fall back to the
   // scaled 20px set on smaller panels.

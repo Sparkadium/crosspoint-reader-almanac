@@ -195,6 +195,26 @@ void AlmanacActivity::loop() {
     return;
   }
 
+  // Touch: swipe up/down pages the list, tap opens a row. Activation is on
+  // release; see listRowTouch() for why the selector is not moved on
+  // finger-down.
+  {
+    const ListLayout L = computeListLayout(renderer, ITEM_COUNT, selector_, /*wantBlurb=*/true);
+    if (listSwipePage(mappedInput, L, ITEM_COUNT, selector_)) {
+      status_.clear();
+      requestUpdate();
+      return;
+    }
+    if (listRowTouch(mappedInput, L, ITEM_COUNT, selector_)) {
+      // A row tap opens a child without a Confirm press/release pair, so clear
+      // the flag or the child's trailing release looks like ours.
+      sawConfirmPress_ = false;
+      status_.clear();
+      open(static_cast<Item>(selector_));
+      return;
+    }
+  }
+
   // onNext/onPrevious resolve to NavNext/NavPrevious, i.e. side Down + front
   // Right and side Up + front Left, with the orientation swap applied. Using
   // raw Up/Down here is why only the side buttons moved the selector.
