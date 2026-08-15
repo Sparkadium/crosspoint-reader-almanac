@@ -399,30 +399,53 @@ void PlanetariumActivity::drawBody(int cx, int cy, int R) {
     }
   }
 
-  // ---- Saturn's rings: procedural, real proportions -----------------------------
-  // Rings live in the equatorial plane, so each is a circle of world points
-  // through the SAME view basis as the texture: tilt the view and they open
-  // and close honestly. Radii in Saturn radii: C 1.24-1.53, B 1.53-1.95,
-  // Cassini gap, A 2.03-2.27. Dot density per band approximates opacity.
-  // A dot shows if it is on the near side (sz > 0) or clears the silhouette.
+  // ---- Saturn's rings ------------------------------------------------------------
+  // Textured from /tex_saturn_ring.bin (Solar System Scope ring strip ->
+  // 512-sample radial profile of luminance+alpha; make_texture.py). Per
+  // pixel in the ring's bounding box we intersect the view ray with the
+  // equatorial plane: P = sx*e + sy*n + t*o with P.z = 0 gives the ring
+  // radius directly. Near side (t > 0) draws over the ball -- bright ring
+  // white, dark opaque ring black; far side (t < 0) draws only where it
+  // clears the silhouette. Alpha is coverage-dithered with Bayer 4x4, so
+  // the C ring stays gauzy and the Cassini gap stays a gap. Falls back to
+  // nothing if the file is missing (the ball still draws).
   if (strcmp(BODIES[body_].name, "Saturn") == 0 && texOk_) {
-    struct Band { float r0, r1; int step; };  // step: draw every Nth ring dot
-    static const Band BANDS[3] = {{1.24f, 1.53f, 3}, {1.56f, 1.95f, 1}, {2.03f, 2.27f, 2}};
-    for (const Band& bd : BANDS) {
-      for (float r = bd.r0; r <= bd.r1; r += 0.055f) {
-        const int n = (int)(r * R * 0.9f);  // dots around this ring
-        for (int i = 0; i < n; i++) {
-          if ((i % (bd.step + 1)) >= 1 && bd.step > 1) continue;
-          const float a = 6.2831853f * i / n;
-          const float Px = r * cosf(a), Py = r * sinf(a);  // Pz = 0: ring plane
-          const float sx = B.m[0] * Px + B.m[1] * Py;
-          const float sy = B.m[3] * Px + B.m[4] * Py;
-          const float sz = B.m[6] * Px + B.m[7] * Py;
-          const float X = cx + sx * R, Y = cy - sy * R;
-          if (X < xl || X >= xr || Y < yt || Y >= yb) continue;
-          const float dx = X - cx, dy = Y - cy;
-          if (sz <= 0 && dx * dx + dy * dy <= (float)R * R) continue;  // behind the ball
-          renderer.drawPixel((int)X, (int)Y, false);
+    static uint8_t ring[4 + 2 + 512 * 2];
+    static bool ringTried = false, ringOk = false;
+    if (!ringTried) {
+      ringTried = true;
+      HalFile rf = Storage.open("/tex_saturn_ring.bin", O_RDONLY);
+      if (rf) {
+        ringOk = rf.read(ring, sizeof(ring)) == (int)sizeof(ring) &&
+                 memcmp(ring, "TRNG", 4) == 0;
+        rf.close();
+      }
+    }
+    const float oz = B.m[8];
+    if (ringOk && fabsf(oz) > 0.02f) {  // edge-on: the rings vanish, honestly
+      constexpr float R_IN = 1.11f, R_OUT = 2.33f;
+      static const uint8_t B4[4][4] = {{0,8,2,10},{12,4,14,6},{3,11,1,9},{15,7,13,5}};
+      const int ext = (int)(R_OUT * R) + 2;
+      const int y0r = cy - ext < (int)yt ? (int)yt : cy - ext;
+      const int y1r = cy + ext >= (int)yb ? (int)yb - 1 : cy + ext;
+      const uint8_t* prof = ring + 6;
+      for (int Y = y0r; Y <= y1r; Y++) {
+        const float sy = (float)(cy - Y) / R;
+        for (int X = cx - ext < (int)xl ? (int)xl : cx - ext;
+             X <= (cx + ext >= (int)xr ? (int)xr - 1 : cx + ext); X++) {
+          const float sx = (float)(X - cx) / R;
+          const float t = -(sx * B.m[2] + sy * B.m[5]) / oz;
+          const float Px = sx * B.m[0] + sy * B.m[3] + t * B.m[6];
+          const float Py = sx * B.m[1] + sy * B.m[4] + t * B.m[7];
+          const float r = sqrtf(Px * Px + Py * Py);
+          if (r < R_IN || r > R_OUT) continue;
+          if (t <= 0 && sx * sx + sy * sy <= 1.0f) continue;  // behind the ball
+          const int idx = (int)((r - R_IN) * (511.0f / (R_OUT - R_IN)));
+          const int lum = prof[idx * 2], alp = prof[idx * 2 + 1];
+          if ((alp >> 4) <= B4[Y & 3][X & 3]) continue;       // coverage dither
+          const bool bright = (lum >> 4) > B4[(Y + 2) & 3][(X + 2) & 3];
+          if (t > 0) renderer.drawPixel(X, Y, !bright);       // over the ball
+          else if (bright) renderer.drawPixel(X, Y, false);   // over space
         }
       }
     }
