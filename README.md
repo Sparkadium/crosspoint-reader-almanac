@@ -1,11 +1,13 @@
 # CrossInk Almanac
 
 A reference library, atlas, planetarium, and puzzle collection for the
-Xteink X4/X3 e-readers, built as a fork of
-[CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)
-(CrossInk variant). Everything runs offline from the SD card on an
-ESP32-C3 with ~320 KB of RAM, and everything on screen is computed or
-sourced — nothing hand-drawn, nothing invented.
+Xteink X4 Pro, X4, and X3 e-readers. Built on
+[CrossInk](https://github.com/uxjulia/CrossInk) (currently v1.5.0), itself
+a variant of
+[CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader).
+Everything runs offline from the SD card — on the C3 devices in ~320 KB of
+RAM — and everything on screen is computed or sourced: nothing hand-drawn,
+nothing invented.
 
 ## Modules
 
@@ -21,7 +23,7 @@ government, history, and statistics for every country and territory.
 
 **Globe** — a spinning orthographic Earth under a fixed crosshair.
 Live day/night terminator with civil-twilight band, country borders,
-country identification under the reticle with one-press Factbook entry,
+country identification under the reticle with one-tap Factbook entry,
 find-a-country (205 countries, flies to the capital), three zoom levels,
 and a full-bleed space mode with starfield. Everything is toggleable down
 to a bare planet.
@@ -35,8 +37,8 @@ the nearest feature.
 
 **Sky Chart** — all-sky star chart for your location: 904 stars (Yale
 Bright Star Catalogue, V ≤ 4.5) with constellation lines, moon phase,
-sunrise/sunset, and time travel in 30-minute or 1-day steps. One gesture
-hides all chrome for a bare sky.
+sunrise/sunset, and time travel in 30-minute or 1-day steps. Lines and
+chrome toggle independently, down to a bare star field on black.
 
 **Calculator** — graphing calculator with a purpose-built one-layer math
 keypad, six expression slots, and Y=-style function plotting.
@@ -59,22 +61,31 @@ card root; each module degrades gracefully (and says which file it wants)
 if its file is absent. All files are downloadable from the Releases page
 or regenerable with the scripts in `tools/`.
 
+Separately, CrossInk's own reader-integrated StarDict dictionary lives in
+`/.dictionaries/<name>/` and needs an **uncompressed** `.dict` — a
+`.dict.dz` is silently skipped. Run it through `scripts/dictionary_tools.py
+prep` first. That dictionary and the Almanac's are independent; both can be
+installed.
+
 ## Building
 
-PlatformIO. The device firmware is the `xlarge` env:
+PlatformIO. One environment per MCU family — a single binary cannot span
+both, so pick the one matching your device:
 
 ```
-pio run -e xlarge --target upload
+pio run -e x4pro   --target upload   # Xteink X4 Pro  (ESP32-S3)
+pio run -e default --target upload   # Xteink X4 / X3 (ESP32-C3)
 ```
 
-Font variants: `tiny` ships the smaller reading sizes, `xlarge` the three
-largest (16/18/20 px). UI code adapts to whichever sizes a variant
-actually carries.
+Reading fonts are the built-in 10/12/14/16 pt set. Larger sizes (Bitter
+18/20) are no longer compiled into the binary; install them as SD-card
+fonts under `/fonts` if you want them. Every list and body-text layout
+measures the fonts actually present at runtime and skips any that are
+missing, so nothing silently renders blank.
 
-X3 hardware clock: the `xlarge` env builds with `ALMANAC_USE_FREEINK_RTC`,
-so an X3's battery-backed RTC keeps time across power-off. The X4 has no
-clock chip; it reports that honestly and asks for the time after deep
-sleep.
+Hardware clock: `ALMANAC_USE_FREEINK_RTC` is set for the X4 Pro (BM8563)
+and the X3, so both keep time across power-off. The X4 has no clock chip;
+it reports that honestly and asks for the time after deep sleep.
 
 ## Data provenance
 
@@ -114,10 +125,44 @@ ephemerides or the standard library.
 
 ## Devices
 
-Xteink X4 (ESP32-C3, 480×800 e-ink) is the primary target; the X3 is
-supported through CrossPoint's runtime board detection. E-ink niceties
-include dithered night shading, disc-local ghost scrubbing instead of
-full-panel refreshes, and fast-refresh navigation throughout.
+**Xteink X4 Pro** — ESP32-S3, 800×480 e-ink, GT911 capacitive touch, dual
+warm/cold frontlight, BM8563 RTC, CW2017 fuel gauge, 8 MB PSRAM. The panel
+controller varies by production batch (SSD1677 on early units, UC8179 on
+later ones) and is detected at boot. Two hardware buttons plus a
+capacitive Home key, so the interface leans on touch — see below.
+
+**Xteink X4 / X3** — ESP32-C3, 480×800 e-ink, four buttons, no touch.
+Board and panel variant are detected at runtime. The X3 adds a
+battery-backed RTC.
+
+E-ink niceties throughout: dithered night shading, disc-local ghost
+scrubbing instead of full-panel refreshes, and fast-refresh navigation.
+
+## Touch
+
+The X4 Pro has no physical Back or Confirm button, so on-screen button
+hints double as touch targets and every hold-to-do-X action is a gesture:
+
+| Where | Gesture | Does |
+|---|---|---|
+| Any list | Tap a row / swipe up-down | Open it / page the list |
+| Dictionary, Wikipedia, Factbook | Buttons | Previous / next entry |
+| | Swipe left-right | Page within an entry |
+| | Swipe down / hold | Random entry / cycle text size |
+| Globe, Moon, Planetarium | Drag | Spin the body |
+| | Tap | Factbook entry / sub-Earth view / home view |
+| | Hold | Menu |
+| Sky Chart | Swipe across / up-down | ±30 minutes / ±1 day |
+| | Tap / hold | Constellation lines / all chrome |
+| Chess | Tap a square | Select, then move |
+| Tsumego | Tap, tap again | Aim, then place |
+| Chess, Tsumego | Swipe left-right (once solved) | Next / previous problem |
+| Calculator | Tap a key, hold for its alternate | Type |
+| | Flick the graph / tap in Trace | Pan / place the cursor |
+| Everywhere | Hold | Menu, where the activity has one |
+
+Button-only devices are unaffected: the touch calls compile to nothing,
+and the four-button mappings are unchanged.
 
 ## Credits
 
