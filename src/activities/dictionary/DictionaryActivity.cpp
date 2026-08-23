@@ -1,7 +1,9 @@
+#include <cstdlib>
 // Arduino.h must come first: on the ESP32 it declares placement new
 // (operator new(size_t, void*)), which std::function needs. ButtonNavigator
 // takes std::function callbacks, so every file using it must see this first.
 #include <Arduino.h>
+#include <Esp.h>
 
 #include "DictionaryActivity.h"
 
@@ -14,14 +16,17 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <strings.h>
 #include <new>
 #include <variant>
+#include <memory>
 
 #include "MappedInputManager.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "activities/almanac/TouchGestures.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "Bitmap.h"
 namespace {
 // Body text sizes. CrossInk 1.5.0 fixed the built-in reading fonts at
 // 10/12/14/16pt (lib/EpdFont/builtinFonts/all.h). Bitter 18/20 still have
@@ -36,7 +41,6 @@ constexpr int BODY_FONTS[] = {
     BITTER_16_FONT_ID,
 };
 constexpr int BODY_PTS[] = {10, 12, 16};
-}
 constexpr int FONT_STEPS = (int)(sizeof(BODY_FONTS) / sizeof(BODY_FONTS[0]));
 static_assert(FONT_STEPS > 0, "every body font size was omitted from this build");
 constexpr int HEAD_FONT = UI_12_FONT_ID;
@@ -45,14 +49,30 @@ std::string lower(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
   return s;
 }
-uint32_t rd32(const uint8_t* p) {  // little-endian, matches struct.pack('<I')
+
+uint32_t rd32(const uint8_t* p) {  // little-endian, matches struct.pack("<I")
   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
-  // namespace
+
+// Keep Wikipedia bodies from exhausting the heap when returned by value from
+// lookup/next/random. DictionaryActivity also clamps; this is the first gate.
+constexpr size_t kMaxEntryDef = 30000;
+void clampDef(std::string& s) {
+  if (s.size() <= kMaxEntryDef) return;
+  s.resize(kMaxEntryDef);
+  auto sp = s.find_last_of(" \t");
+  if (sp != std::string::npos && sp > kMaxEntryDef * 2 / 3) s.resize(sp);
+  s += "…";
+}
+}  // namespace
 
 // ===========================================================================
 //  WcdbReader
 // ===========================================================================
+
+static bool bodyUsable(const WcdbReader::Entry& e) {
+  return e.found && e.definition && e.defLen > 0 && e.definition[0] != '>';
+}
 
 bool WcdbReader::begin(const char* path) {
   end();
@@ -70,15 +90,10 @@ bool WcdbReader::begin(const char* path) {
   const size_t need = INDEX_OFFSET + (size_t)blocks_ * RECORD_SIZE;
   if (file_.size() < need) return false;
 
-  // The index stays on the card. Reserve the working buffers once, to their
-  // fixed ceilings: resize() inside an existing capacity never reallocates, so
-  // jumping between blocks of different sizes cannot fragment the heap.
+  // Reserve once to MAX (32k). Avoids realloc/fragmentation on every Next.
+  // 32k+~35k fits the C3 when done once at open (not 64k).
   decBuf_.reserve(MAX_RAW);
   compBuf_.reserve(MAX_COMP);
-  if (decBuf_.capacity() < MAX_RAW || compBuf_.capacity() < MAX_COMP) {
-    end();  // not enough contiguous heap; fail cleanly rather than abort() later
-    return false;
-  }
 
   curBlk_ = curLine_ = 0;
   ready_ = true;
@@ -103,8 +118,7 @@ void WcdbReader::end() {
   if (file_) file_.close();
   decBuf_.clear();
   compBuf_.clear();
-  decBuf_.shrink_to_fit();
-  compBuf_.shrink_to_fit();
+  // keep capacity — shrink_to_fit fragments the heap on the C3
   decSize_ = 0;
   cachedBlk_ = -1;
   curBlk_ = curLine_ = 0;
@@ -127,20 +141,24 @@ bool WcdbReader::decompressBlock(int idx) {
   if (b.compSize == 0 || b.compSize > MAX_COMP) return false;
   if ((uint64_t)b.offset + b.compSize > (uint64_t)file_.size()) return false;
 
-  compBuf_.resize(b.compSize);  // within the reserved capacity: no reallocation
-  decBuf_.resize(b.rawSize);
+  // Full block (already <= MAX_RAW). Do NOT clamp to kMaxEntryDef here —
+  // that truncated multi-article blocks and broke Next/Random.
+  const uint32_t want = b.rawSize;
+
+compBuf_.resize(b.compSize);
+  decBuf_.resize(want);
 
   if (!file_.seek(b.offset)) return false;
   if (file_.read(compBuf_.data(), b.compSize) != (int)b.compSize) return false;
 
-  // Raw DEFLATE (wbits -15): no zlib header, so do NOT call skipZlibHeader().
   InflateReader inf;
-  inf.init();  // one-shot: the whole block is in memory
+  inf.init();
   inf.setSource(compBuf_.data(), b.compSize);
-  if (!inf.read(decBuf_.data(), b.rawSize)) return false;
+  if (!inf.read(decBuf_.data(), (int)want)) return false;
 
-  decSize_ = b.rawSize;
+  decSize_ = want;
   cachedBlk_ = idx;
+  compBuf_.clear();
   return true;
 }
 
@@ -163,9 +181,13 @@ int WcdbReader::findBlock(const std::string& query) {
 }
 
 int WcdbReader::linesInBlock() const {
+  if (decSize_ == 0) return 0;
   int count = 0;
   for (uint32_t i = 0; i < decSize_; i++)
     if (decBuf_[i] == '\n') count++;
+  // Truncated long articles often have no trailing newline — still one record.
+  if (count == 0) return 1;
+  if (decBuf_[decSize_ - 1] != '\n') count++;
   return count;
 }
 
@@ -181,7 +203,8 @@ WcdbReader::Entry WcdbReader::entryInBlock(int lineIdx) const {
       while (tab < end && decBuf_[tab] != '\t') tab++;
       if (tab < end) {
         e.word.assign(reinterpret_cast<const char*>(&decBuf_[pos]), tab - pos);
-        e.definition.assign(reinterpret_cast<const char*>(&decBuf_[tab + 1]), end - tab - 1);
+        e.definition = reinterpret_cast<const char*>(&decBuf_[tab + 1]);
+        e.defLen = (size_t)(end - tab - 1);
         e.found = true;
       }
       return e;
@@ -194,10 +217,13 @@ WcdbReader::Entry WcdbReader::entryInBlock(int lineIdx) const {
 
 // A definition of ">target" redirects; mirrors WatchyDict::showEntry().
 WcdbReader::Entry WcdbReader::resolve(Entry e) {
-  if (!e.found || e.definition.empty() || e.definition[0] != '>') return e;
-  std::string target = e.definition.substr(1);
+  if (!e.found || !e.definition || e.defLen == 0 || e.definition[0] != '>') return e;
+  // Copy target title out of decBuf_ before lookup() overwrites the block.
+  std::string target(e.definition + 1, e.defLen > 0 ? e.defLen - 1 : 0);
   while (!target.empty() && isspace((unsigned char)target.front())) target.erase(target.begin());
   while (!target.empty() && isspace((unsigned char)target.back())) target.pop_back();
+  auto hash = target.find('#');
+  if (hash != std::string::npos) target.resize(hash);
 
   const std::string original = e.word;
   Entry r = lookup(target);  // moves the cursor to the target — intended
@@ -205,7 +231,14 @@ WcdbReader::Entry WcdbReader::resolve(Entry e) {
     r.word = original + " -> " + r.word;
     return r;
   }
-  e.definition = "see: " + target;
+  // Static buffer so we never heap-allocate a definition string.
+  static char seeBuf[192];
+  int n = snprintf(seeBuf, sizeof(seeBuf), "see: %s", target.c_str());
+  if (n < 0) n = 0;
+  e.word = original;
+  e.definition = seeBuf;
+  e.defLen = (size_t)std::min(n, (int)sizeof(seeBuf) - 1);
+  e.found = true;
   return e;
 }
 
@@ -231,7 +264,8 @@ WcdbReader::Entry WcdbReader::lookup(const std::string& query) {
         if (wl == q) {
           Entry e;
           e.word = std::move(w);
-          e.definition.assign(reinterpret_cast<const char*>(&decBuf_[tab + 1]), end - tab - 1);
+          e.definition = reinterpret_cast<const char*>(&decBuf_[tab + 1]);
+          e.defLen = (size_t)(end - tab - 1);
           e.found = true;
           curBlk_ = b;
           curLine_ = line;
@@ -277,80 +311,406 @@ WcdbReader::Entry WcdbReader::currentEntry() {
   return resolve(entryInBlock(curLine_));
 }
 
+bool WcdbReader::currentBody(const char** ptr, size_t* len) {
+  if (!ptr || !len) return false;
+  *ptr = nullptr;
+  *len = 0;
+  if (!ready_ || !decompressBlock(curBlk_)) return false;
+  // Cursor already sits on the resolved target after next/prev/lookup/random.
+  Entry e = entryInBlock(curLine_);
+  if (!e.found || !e.definition || e.defLen == 0) return false;
+  // Skip redirect stubs — caller should have resolve()'d first
+  if (e.definition[0] == '>') return false;
+  *ptr = e.definition;
+  *len = e.defLen > kMaxEntryDef ? kMaxEntryDef : e.defLen;
+  return true;
+}
+
 WcdbReader::Entry WcdbReader::next() {
-  if (!ready_ || !decompressBlock(curBlk_)) return Entry{};
-  int nb = curBlk_, nl = curLine_ + 1;
-  if (nl >= linesInBlock()) {
-    nl = 0;
-    if (++nb >= (int)blocks_) nb = 0;
-  }
-  if (!decompressBlock(nb)) return Entry{};
-  Entry e = entryInBlock(nl);
-  if (e.found) {
+  if (!ready_) return Entry{};
+  for (int attempt = 0; attempt < 256; attempt++) {
+    if (!decompressBlock(curBlk_)) {
+      curBlk_ = (curBlk_ + 1) % (int)blocks_;
+      curLine_ = 0;
+      continue;
+    }
+    int nb = curBlk_, nl = curLine_ + 1;
+    if (nl >= linesInBlock()) {
+      nl = 0;
+      if (++nb >= (int)blocks_) nb = 0;
+    }
+    if (!decompressBlock(nb)) {
+      curBlk_ = nb;
+      curLine_ = 0;
+      continue;
+    }
+    Entry raw = entryInBlock(nl);
+    if (!raw.found) {
+      curBlk_ = nb;
+      curLine_ = nl;
+      continue;
+    }
     curBlk_ = nb;
     curLine_ = nl;
+    Entry e = resolve(raw);
+    if (bodyUsable(e)) return e;
+    if (e.found && e.definition && e.defLen > 0) return e;
   }
-  return resolve(e);
+  return Entry{};
 }
 
 WcdbReader::Entry WcdbReader::prev() {
   if (!ready_) return Entry{};
-  int nb = curBlk_, nl = curLine_ - 1;
-  if (nl < 0) {
-    if (--nb < 0) nb = (int)blocks_ - 1;
+  for (int attempt = 0; attempt < 64; attempt++) {
+    int nb = curBlk_, nl = curLine_ - 1;
+    if (nl < 0) {
+      if (--nb < 0) nb = (int)blocks_ - 1;
+      if (!decompressBlock(nb)) return Entry{};
+      nl = linesInBlock() - 1;
+    }
     if (!decompressBlock(nb)) return Entry{};
-    nl = linesInBlock() - 1;
-  }
-  if (!decompressBlock(nb)) return Entry{};
-  Entry e = entryInBlock(nl);
-  if (e.found) {
+    Entry raw = entryInBlock(nl);
+    if (!raw.found) return Entry{};
     curBlk_ = nb;
     curLine_ = nl;
+    Entry e = resolve(raw);
+    if (bodyUsable(e)) return e;
+    if (e.found && e.definition && e.defLen > 0) return e;
   }
-  return resolve(e);
+  return Entry{};
 }
 
 WcdbReader::Entry WcdbReader::randomEntry() {
   if (!ready_ || blocks_ == 0) return Entry{};
-  const int rb = (int)(esp_random() % blocks_);
-  if (!decompressBlock(rb)) return Entry{};
-  const int lines = linesInBlock();
-  if (lines <= 0) return Entry{};
-  const int rl = (int)(esp_random() % (uint32_t)lines);
-  Entry e = entryInBlock(rl);
-  if (e.found) {
+  for (int attempt = 0; attempt < 256; attempt++) {
+    const int rb = (int)(esp_random() % blocks_);
+    if (!decompressBlock(rb)) continue;
+    const int lines = linesInBlock();
+    if (lines <= 0) continue;
+    const int rl = (int)(esp_random() % (uint32_t)lines);
+    Entry raw = entryInBlock(rl);
+    if (!raw.found) continue;
     curBlk_ = rb;
     curLine_ = rl;
+    Entry e = resolve(raw);
+    if (bodyUsable(e)) return e;
+    if (e.found && e.definition && e.defLen > 0) return e;
   }
-  return resolve(e);
+  return Entry{};
 }
 
 // ===========================================================================
 //  DictionaryActivity
 // ===========================================================================
 
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Phase 3: 24-bit BMP lead images (/wiki_img/<slug>.bmp) — device-native format
+// ---------------------------------------------------------------------------
+namespace {
+
+#pragma pack(push, 1)
+struct BmpFileHeader {
+  uint16_t magic;
+  uint32_t fileSize;
+  uint16_t res1;
+  uint16_t res2;
+  uint32_t pixelOffset;
+};
+struct BmpInfoHeader {
+  uint32_t size;
+  int32_t width;
+  int32_t height;
+  uint16_t planes;
+  uint16_t bpp;
+  uint32_t compression;
+  uint32_t imageSize;
+  int32_t ppmX;
+  int32_t ppmY;
+  uint32_t colorsUsed;
+  uint32_t colorsImportant;
+};
+#pragma pack(pop)
+
+bool parseImgToken(const char* s, size_t n, char* slugOut, size_t slugCap) {
+  if (!s || n < 10 || slugCap < 2) return false;
+  size_t st = 0;
+  while (st + 6 < n) {
+    if (s[st] == '@' && s[st + 1] == '@' && s[st + 2] == 'I' && s[st + 3] == 'M' &&
+        s[st + 4] == 'G' && s[st + 5] == ':')
+      break;
+    st++;
+  }
+  if (st + 6 >= n) return false;
+  size_t i = st + 6, j = 0;
+  while (i < n && s[i] != '@' && j + 1 < slugCap) {
+    char c = s[i++];
+    if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-')
+      slugOut[j++] = c;
+    else if (c == ' ' || c == '\t')
+      break;
+    else
+      return false;
+  }
+  slugOut[j] = '\0';
+  return j > 0 && i + 1 < n && s[i] == '@' && s[i + 1] == '@';
+}
+
+
+
+
+static bool findImgPath(const char* slug, char* pathOut, size_t pathCap) {
+  const char* patterns[] = {
+      "/wiki_img/%s.bmp", "wiki_img/%s.bmp", "/Wiki_img/%s.bmp",
+      "/sd/wiki_img/%s.bmp", "/wikipedia/wiki_img/%s.bmp",
+  };
+  for (const char* pat : patterns) {
+    snprintf(pathOut, pathCap, pat, slug);
+    HalFile f = Storage.open(pathOut, O_RDONLY);
+    if (f) { f.close(); return true; }
+  }
+  return false;
+}
+
+static void fitSize(int fullW, int fullH, int maxW, int maxH, int& w, int& h) {
+  w = fullW;
+  h = fullH;
+  if (w > maxW) { h = h * maxW / w; w = maxW; }
+  if (h > maxH) { w = w * maxH / h; h = maxH; }
+  if (w < 1) w = 1;
+  if (h < 1) h = 1;
+}
+
+int imgHeight(const char* slug, int maxW, int maxH) {
+  char path[96];
+  if (!findImgPath(slug, path, sizeof(path))) return 0;
+  HalFile f = Storage.open(path, O_RDONLY);
+  if (!f) return 0;
+  Bitmap bitmap(f, false);
+  auto err = bitmap.parseHeaders();
+  if (err != BmpReaderError::Ok) { f.close(); return 0; }
+  int fullW = bitmap.getWidth();
+  int fullH = bitmap.getHeight();
+  f.close();
+  if (fullW <= 0 || fullH <= 0) return 0;
+  int w, h;
+  fitSize(fullW, fullH, maxW, maxH, w, h);
+  return h;
+}
+
+// imgMode: 0=dither 1=no-dither 2=t160 3=t128 4=t96 — hold Prev to cycle
+bool drawImgAt(GfxRenderer& renderer, const char* slug, int x, int y, int maxW, int maxH,
+               uint8_t imgMode) {
+  char path[96];
+  if (!findImgPath(slug, path, sizeof(path))) {
+    renderer.fillRect(x, y, std::min(maxW, 200), 8, true);
+    return false;
+  }
+  HalFile f = Storage.open(path, O_RDONLY);
+  if (!f) {
+    renderer.fillRect(x, y, std::min(maxW, 200), 8, true);
+    return false;
+  }
+
+  const bool useBitmapApi = (imgMode <= 1);
+  if (useBitmapApi) {
+    const bool dither = (imgMode == 0);
+    Bitmap bitmap(f, dither);
+    auto err = bitmap.parseHeaders();
+    if (err != BmpReaderError::Ok) {
+      f.close();
+      renderer.fillRect(x, y, std::min(maxW, 200), 8, true);
+      return false;
+    }
+    int w, h;
+    fitSize(bitmap.getWidth(), bitmap.getHeight(), maxW, maxH, w, h);
+    const int x0 = x + (maxW > w ? (maxW - w) / 2 : 0);
+    renderer.fillRect(x0, y, w, h, false);
+    renderer.drawBitmap(bitmap, x0, y, w, h, 0.0f, 0.0f);
+    f.close();
+    return true;
+  }
+
+  // Manual threshold modes 2–4
+  BmpFileHeader fh{};
+  BmpInfoHeader ih{};
+  if (f.read(reinterpret_cast<uint8_t*>(&fh), sizeof(fh)) != (int)sizeof(fh) ||
+      f.read(reinterpret_cast<uint8_t*>(&ih), sizeof(ih)) != (int)sizeof(ih) ||
+      fh.magic != 0x4D42 || ih.bpp != 24 || ih.compression != 0) {
+    f.close();
+    renderer.fillRect(x, y, std::min(maxW, 200), 8, true);
+    return false;
+  }
+  const bool bottomUp = ih.height > 0;
+  int fullW = ih.width;
+  int fullH = ih.height < 0 ? -ih.height : ih.height;
+  if (fullW <= 0 || fullH <= 0 || fullW > 1200 || fullH > 1600) {
+    f.close();
+    return false;
+  }
+  int w, h;
+  fitSize(fullW, fullH, maxW, maxH, w, h);
+  const int rowRaw = fullW * 3;
+  const int rowSize = (rowRaw + 3) & ~3;
+  if (rowSize > 4096) { f.close(); return false; }
+  uint8_t row[4096];
+  const int x0 = x + (maxW > w ? (maxW - w) / 2 : 0);
+  renderer.fillRect(x0, y, w, h, false);
+
+  int thresh = 128;
+  if (imgMode == 2) thresh = 160;
+  else if (imgMode == 3) thresh = 128;
+  else if (imgMode == 4) thresh = 96;
+
+  for (int screenRow = 0; screenRow < h; screenRow++) {
+    int srcRow = (fullH <= 1) ? 0 : (screenRow * (fullH - 1) / (h > 1 ? h - 1 : 1));
+    if (srcRow >= fullH) srcRow = fullH - 1;
+    int fileRow = bottomUp ? (fullH - 1 - srcRow) : srcRow;
+    uint32_t off = fh.pixelOffset + (uint32_t)fileRow * (uint32_t)rowSize;
+    if (!f.seekSet(off)) break;
+    if (f.read(row, rowSize) != rowSize) break;
+    renderer.fillRect(x0, y + screenRow, w, 1, false);
+    int runStart = -1;
+    for (int col = 0; col < w; col++) {
+      int srcCol = (fullW <= 1) ? 0 : (col * (fullW - 1) / (w > 1 ? w - 1 : 1));
+      if (srcCol >= fullW) srcCol = fullW - 1;
+      const uint8_t bb = row[srcCol * 3 + 0];
+      const uint8_t gg = row[srcCol * 3 + 1];
+      const uint8_t rr = row[srcCol * 3 + 2];
+      const int luma = (rr * 3 + gg * 6 + bb) / 10;
+      const bool black = luma < thresh;
+      if (black) {
+        if (runStart < 0) runStart = col;
+      } else if (runStart >= 0) {
+        renderer.fillRect(x0 + runStart, y + screenRow, col - runStart, 1, true);
+        runStart = -1;
+      }
+    }
+    if (runStart >= 0)
+      renderer.fillRect(x0 + runStart, y + screenRow, w - runStart, 1, true);
+  }
+  f.close();
+  return true;
+}
+
+}  // namespace
+
+
+
+void DictionaryActivity::saveResume() const {
+  if (!cdbPath_ || !cdbPath_[0]) return;
+  Preferences p;
+  if (p.begin("lowio_wiki", false)) {
+    p.putString("resume_cdb", cdbPath_);
+    p.putString("resume_word", entryWord_.c_str());
+    p.putUInt("resume_page", (uint32_t)page_);
+    p.end();
+  }
+  Storage.mkdir("/.lowio");
+  HalFile f = Storage.open("/.lowio/resume.txt", O_CREAT | O_TRUNC | O_WRONLY);
+  if (f) {
+    // path\nword\npage\n
+    f.write(reinterpret_cast<const uint8_t*>(cdbPath_), strlen(cdbPath_));
+    f.write(reinterpret_cast<const uint8_t*>("\n"), 1);
+    f.write(reinterpret_cast<const uint8_t*>(entryWord_.c_str()), entryWord_.size());
+    f.write(reinterpret_cast<const uint8_t*>("\n"), 1);
+    char pg[16];
+    snprintf(pg, sizeof(pg), "%d\n", page_);
+    f.write(reinterpret_cast<const uint8_t*>(pg), strlen(pg));
+    f.close();
+  }
+}
+
+void DictionaryActivity::tryRestoreResume() {
+  std::string wantWord;
+  int wantPage = 0;
+  {
+    Preferences p;
+    if (p.begin("lowio_wiki", true)) {
+      String w = p.getString("resume_word", "");
+      String path = p.getString("resume_cdb", "");
+      wantPage = (int)p.getUInt("resume_page", 0);
+      p.end();
+      if (path.length() > 0 && strcasecmp(path.c_str(), cdbPath_) == 0 && w.length() > 0) {
+        wantWord = w.c_str();
+      }
+    }
+  }
+  if (wantWord.empty()) {
+    HalFile f = Storage.open("/.lowio/resume.txt", O_RDONLY);
+    if (f) {
+      char buf[256];
+      int n = f.read(reinterpret_cast<uint8_t*>(buf), sizeof(buf) - 1);
+      f.close();
+      if (n > 0) {
+        buf[n] = 0;
+        char* line1 = buf;
+        char* line2 = strchr(buf, '\n');
+        char* line3 = nullptr;
+        if (line2) {
+          *line2++ = 0;
+          line3 = strchr(line2, '\n');
+          if (line3) {
+            *line3++ = 0;
+            wantPage = atoi(line3);
+          }
+          if (strcasecmp(line1, cdbPath_) == 0 && line2[0]) wantWord = line2;
+        }
+      }
+    }
+  }
+  if (wantWord.empty()) return;
+  WcdbReader::Entry e = dict_.lookup(wantWord);
+  if (e.found) {
+    setEntry(e);
+    // restore page after setEntry resetPaging
+    page_ = wantPage;
+    if (page_ < 0) page_ = 0;
+  }
+}
+
+
 void DictionaryActivity::onEnter() {
   Activity::onEnter();
   ButtonNavigator::setMappedInputManager(mappedInput);
-
   {
     Preferences p;
     p.begin("almanac", true);
-    fontStep_ = p.getUChar("dictfont", 0);  // 12pt by default
+    fontStep_ = p.getUChar("dictfont", 0);
+    imgMode_ = p.getUChar("dictimg", 1);
     p.end();
     if (fontStep_ >= FONT_STEPS) fontStep_ = 0;
+    if (imgMode_ >= IMG_MODE_COUNT) imgMode_ = 1;
   }
 
+  confirmHeld_ = confirmLongHandled_ = sawBackPress_ = backLongHandled_ = leftHeld_ = leftLongHandled_ = false;
+
   loadError_ = !dict_.begin(cdbPath_);
-  confirmHeld_ = confirmLongHandled_ = sawBackPress_ = backLongHandled_ = false;
-  if (!loadError_) setEntry(dict_.currentEntry());
+  if (!loadError_) {
+    // No tryRestoreResume() — avoids abort on bad/stale NVS path under Almanac.
+    WcdbReader::Entry e = dict_.currentEntry();
+    for (int n = 0; n < 16 && !(e.found && e.definition && e.defLen > 0 && e.definition[0] != '>'); n++) {
+      e = dict_.next();
+    }
+    if (e.found) {
+      setEntry(e);
+    } else {
+      entryFound_ = false;
+      entryWord_.clear();
+    }
+  }
   requestUpdate();
 }
 
+
 void DictionaryActivity::onExit() {
+  if (!loadError_ && !entryWord_.empty()) {
+    saveResume();
+  }
   Activity::onExit();
   dict_.end();
-  wrapped_.clear();
+  lineStarts_.clear();
 }
 
 int DictionaryActivity::bodyFont() const {
@@ -366,27 +726,180 @@ void DictionaryActivity::cycleFont() {
   p.begin("almanac", false);
   p.putUChar("dictfont", fontStep_);
   p.end();
+}
+
+void DictionaryActivity::cycleImgMode() {
+  imgMode_ = (uint8_t)((imgMode_ + 1) % IMG_MODE_COUNT);
+  Preferences p;
+  p.begin("almanac", false);
+  p.putUChar("dictimg", imgMode_);
+  p.end();
+  resetPaging();
+}
+
+void DictionaryActivity::resetPaging() {
   page_ = 0;
-  wrapped_.clear();  // re-wrap at the new size
+  pagesSinceFull_ = 0;
+  lineStarts_.clear();
+  bodyW_ = 0;
+  wrapFont_ = -1;
 }
 
 void DictionaryActivity::setEntry(const WcdbReader::Entry& e) {
-  entry_ = e;
-  page_ = 0;
-  wrapped_.clear();  // re-wrapped in render(), where the width is known
+  resetPaging();
+  entryWord_ = e.word;
+  entryFound_ = e.found;
+  bodyLen_ = e.defLen;
+  fallbackLen_ = 0;
+  fallbackBuf_[0] = '\0';
+  // Keep short bodies (e.g. "see: Foo") when currentBody() cannot read them
+  // because the on-disk line is still a '>' redirect.
+  if (e.definition && e.defLen > 0 && e.defLen < sizeof(fallbackBuf_)) {
+    memcpy(fallbackBuf_, e.definition, e.defLen);
+    fallbackLen_ = e.defLen;
+    fallbackBuf_[fallbackLen_] = 0;
+  }
+  // Resume disabled for Almanac stability (re-enable later if needed)
+  // if (!entryWord_.empty()) { saveResume(); }
 }
+
+
+void DictionaryActivity::rebuildLineStarts(int bodyW) {
+  lineStarts_.clear();
+  bodyW_ = bodyW;
+  wrapFont_ = bodyFont();
+
+  const char* s = nullptr;
+  size_t sLen = 0;
+  if (!entryFound_) {
+    lineStarts_.push_back(0);
+    bodyLen_ = 0;
+    return;
+  }
+  if (!dict_.currentBody(&s, &sLen) || !s || sLen == 0) {
+    if (fallbackLen_ > 0) {
+      s = fallbackBuf_;
+      sLen = fallbackLen_;
+    } else {
+      lineStarts_.push_back(0);
+      bodyLen_ = 0;
+      return;
+    }
+  }
+  if (sLen > kMaxEntryDef) sLen = kMaxEntryDef;
+  bodyLen_ = sLen;
+
+  const int lh = std::max(1, renderer.getLineHeight(wrapFont_));
+  const int charW = std::max(5, (lh * 2) / 5);
+  const int maxChars = std::max(8, (bodyW * 9 / 10) / charW);
+
+  auto startsWithHeading = [](const char* p, size_t n) -> bool {
+    size_t i = 0;
+    while (i < n && (p[i] == ' ' || p[i] == '\t')) i++;
+    return (n - i) >= 3 && p[i] == '#' && p[i + 1] == '#' && p[i + 2] == ' ';
+  };
+  auto isBulletAt = [&](size_t p) -> bool {
+    return p + 2 < sLen && (unsigned char)s[p] == 0xE2 &&
+           (unsigned char)s[p + 1] == 0x80 && (unsigned char)s[p + 2] == 0xA2;
+  };
+
+  size_t pos = 0;
+  while (pos < sLen && lineStarts_.size() < 2500) {
+    while (pos < sLen) {
+      if (s[pos] == ' ' || s[pos] == '\t') { pos++; continue; }
+      if (isBulletAt(pos)) { pos += 3; continue; }
+      break;
+    }
+    if (pos >= sLen) break;
+
+    // Image token: reserve vertical slots ≈ bitmap height / line height
+    if (pos + 10 <= sLen && strncmp(s + pos, "@@IMG:", 6) == 0) {
+      char slug[68];
+      size_t tokEnd = pos + 6;
+      while (tokEnd + 1 < sLen && !(s[tokEnd] == '@' && s[tokEnd + 1] == '@')) tokEnd++;
+      if (tokEnd + 1 < sLen) tokEnd += 2;
+      if (parseImgToken(s + pos, tokEnd - pos, slug, sizeof(slug))) {
+        // Cap for layout: ~55% of typical content height (~400px)
+        const int maxLayoutH = 400;
+        int imgH = imgHeight(slug, bodyW_, maxLayoutH);
+        if (imgH <= 0) imgH = lh * 3;
+        const int slots = std::max(1, (imgH + lh - 1) / lh);
+        for (int k = 0; k < slots && lineStarts_.size() < 2500; k++)
+          lineStarts_.push_back((uint32_t)pos);
+        pos = tokEnd;
+        while (pos < sLen && (s[pos] == ' ' || s[pos] == '\t')) pos++;
+        if (pos + 3 < sLen && s[pos] == ' ' && (unsigned char)s[pos + 1] == 0xE2) pos += 4;
+        while (pos < sLen && s[pos] == ' ') pos++;
+        continue;
+      }
+    }
+
+    lineStarts_.push_back((uint32_t)pos);
+
+    size_t end = std::min(sLen, pos + (size_t)maxChars);
+    if (startsWithHeading(s + pos, sLen - pos)) {
+      size_t hEnd = pos;
+      while (hEnd < sLen && !isBulletAt(hEnd)) {
+        if (s[hEnd] == '\n') break;
+        hEnd++;
+      }
+      if (hEnd > end) end = hEnd;
+    }
+
+    // Hard break at " • " / bullet
+    for (size_t hard = pos; hard + 3 <= end; hard++) {
+      if (s[hard] == ' ' && isBulletAt(hard + 1)) {
+        end = hard;
+        break;
+      }
+      if (isBulletAt(hard)) {
+        end = hard;
+        break;
+      }
+    }
+
+    if (end < sLen && end == std::min(sLen, pos + (size_t)maxChars)) {
+      size_t brk = end;
+      while (brk > pos && s[brk] != ' ' && s[brk] != '\t') brk--;
+      if (brk > pos) end = brk;
+    }
+    if (end <= pos) end = std::min(sLen, pos + 1);
+
+    pos = end;
+    while (pos < sLen && (s[pos] == ' ' || s[pos] == '\t')) pos++;
+  }
+    // Drop leading line starts that are only whitespace/bullets (phantom gaps above images)
+  auto isEmptySeg = [&](uint32_t a, uint32_t b) -> bool {
+    while (a < b && (s[a] == ' ' || s[a] == '\t')) a++;
+    if (a + 2 < b && (unsigned char)s[a] == 0xE2 && (unsigned char)s[a+1] == 0x80 &&
+        (unsigned char)s[a+2] == 0xA2) {
+      a += 3;
+      while (a < b && (s[a] == ' ' || s[a] == '\t')) a++;
+    }
+    return a >= b;
+  };
+  while (lineStarts_.size() >= 2) {
+    uint32_t a = lineStarts_[0];
+    uint32_t b = lineStarts_[1];
+    if (!isEmptySeg(a, b)) break;
+    lineStarts_.erase(lineStarts_.begin());
+  }
+
+  if (lineStarts_.empty()) lineStarts_.push_back(0);
+}
+
 
 int DictionaryActivity::bodyLinesPerPage() const {
   const auto& m = UITheme::getInstance().getMetrics();
   const int top = m.topPadding + m.headerHeight + m.verticalSpacing;
-  const int usable = renderer.getScreenHeight() - top - m.buttonHintsHeight - m.verticalSpacing;
+  const int footer = m.buttonHintsHeight + m.verticalSpacing +
+                     renderer.getLineHeight(SMALL_FONT_ID) + 8;
+  const int usable = renderer.getScreenHeight() - top - footer;
   return std::max(1, usable / renderer.getLineHeight(bodyFont()));
 }
 
 void DictionaryActivity::openSearch() {
   auto handler = [this](const ActivityResult& res) {
-    // The keyboard consumed the press; its trailing release reaches us without
-    // a matching press and is discarded by the press/release matching in loop().
     confirmHeld_ = confirmLongHandled_ = sawBackPress_ = backLongHandled_ = false;
     if (res.isCancelled) {
       requestUpdate(true);
@@ -404,7 +917,6 @@ void DictionaryActivity::openSearch() {
       status_.clear();
       setEntry(e);
     } else {
-      // Fall back to the first prefix match, as the watch's match-select did.
       auto matches = dict_.prefixSearch(typed, 1);
       if (!matches.empty()) {
         status_.clear();
@@ -421,13 +933,6 @@ void DictionaryActivity::openSearch() {
 }
 
 void DictionaryActivity::loop() {
-  // Hold anywhere to cycle the body text size. The hold-Back branch below needs
-  // a physical Back button; a touch hint gives press+release with no held state
-  // between them, so isPressed() never sees the hold.
-  // Swipe down for a random entry -- the hold-Confirm that used to do it cannot
-  // fire without a physical Confirm. Up/Down page the text on the hardware
-  // buttons, and left/right step entries via the hints, so a vertical swipe was
-  // the free slot.
   if (!loadError_ && mappedInput.wasSwipe() == MappedInputManager::SwipeDir::Down) {
     auto e = dict_.randomEntry();
     if (e.found) {
@@ -455,21 +960,20 @@ void DictionaryActivity::loop() {
   }
   if (sawBackPress_ && !backLongHandled_ && mappedInput.isPressed(MappedInputManager::Button::Back) &&
       mappedInput.getHeldTime() > LONG_PRESS_MS) {
-    backLongHandled_ = true;  // hold Back = smaller/larger text
+    backLongHandled_ = true;
     cycleFont();
     requestUpdate();
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    if (!sawBackPress_) return;  // leftover from the keyboard
+    if (!sawBackPress_) return;
     const bool wasLong = backLongHandled_;
     sawBackPress_ = backLongHandled_ = false;
-    if (wasLong) return;  // the hold already changed the size
+    if (wasLong) return;
     finish();
     return;
   }
 
-  // Hold Confirm = random word. Short press = search.
   if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
     confirmHeld_ = true;
     confirmLongHandled_ = false;
@@ -486,11 +990,11 @@ void DictionaryActivity::loop() {
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (!confirmHeld_) return;  // leftover from the keyboard
+    if (!confirmHeld_) return;
     const bool wasLong = confirmLongHandled_;
     confirmHeld_ = false;
     confirmLongHandled_ = false;
-    if (wasLong) return;  // the long-press already served a random word
+    if (wasLong) return;
     openSearch();
     return;
   }
@@ -513,32 +1017,43 @@ void DictionaryActivity::loop() {
     }
   };
 
+  // Left/Prev: short = previous article, hold = cycle image render mode
+  if (mappedInput.wasPressed(MappedInputManager::Button::Left)) {
+    leftHeld_ = true;
+    leftLongHandled_ = false;
+  }
+  if (leftHeld_ && !leftLongHandled_ && mappedInput.isPressed(MappedInputManager::Button::Left) &&
+      mappedInput.getHeldTime() > LONG_PRESS_MS) {
+    leftLongHandled_ = true;
+    cycleImgMode();
+    requestUpdate();
+    return;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+    if (leftHeld_) {
+      const bool wasLong = leftLongHandled_;
+      leftHeld_ = leftLongHandled_ = false;
+      if (!wasLong) goPrev();
+    }
+  }
+
   nav_.onPress({MappedInputManager::Button::Right}, goNext);
-  nav_.onPress({MappedInputManager::Button::Left}, goPrev);
   nav_.onContinuous({MappedInputManager::Button::Right}, goNext);
-  nav_.onContinuous({MappedInputManager::Button::Left}, goPrev);
 
   const int perPage = bodyLinesPerPage();
   auto pageForward = [&] {
-    if ((page_ + 1) * perPage < (int)wrapped_.size()) {
-      page_++;
+    if ((page_ + 1) * perPage < (int)lineStarts_.size()) {
+      page_++; pagesSinceFull_++;
       moved = true;
     }
   };
   auto pageBack = [&] {
     if (page_ > 0) {
-      page_--;
+      page_--; pagesSinceFull_++;
       moved = true;
     }
   };
 
-  // Where the panel has a touchscreen, the two hardware buttons are worth more
-  // on entry navigation than on paging. Left/Right are front buttons the X4 Pro
-  // does not have -- they only arrive as hint taps -- so prev/next was the one
-  // frequent action with no physical control. Paging moves to horizontal swipes,
-  // which is the page-turn idiom anyway and is something buttons cannot express
-  // as naturally. On button-only devices nothing changes: Left/Right already do
-  // prev/next there, so Up/Down stay on paging.
   if (mappedInput.hasTouch()) {
     nav_.onPress({MappedInputManager::Button::Down}, goNext);
     nav_.onPress({MappedInputManager::Button::Up}, goPrev);
@@ -558,14 +1073,16 @@ void DictionaryActivity::loop() {
 }
 
 void DictionaryActivity::render(RenderLock&&) {
+  // Full clear every frame — partial e-ink refresh was stacking pages/boot logo
   renderer.clearScreen();
+
   const auto& m = UITheme::getInstance().getMetrics();
   const int pageW = renderer.getScreenWidth();
   const int pageH = renderer.getScreenHeight();
 
   if (loadError_) {
     renderer.drawCenteredText(HEAD_FONT, pageH / 2 - 20, title_);
-    std::string msg = std::string("Copy ") + (cdbPath_ + 1) + " to the SD card root";
+    std::string msg = "No wiki data";
     renderer.drawCenteredText(SMALL_FONT_ID, pageH / 2 + 10, msg.c_str());
     GUI.drawButtonHints(renderer, "Back", "", "", "");
     renderer.displayBuffer();
@@ -573,31 +1090,136 @@ void DictionaryActivity::render(RenderLock&&) {
   }
 
   const char* title = !status_.empty() ? status_.c_str()
-                                       : (entry_.found ? entry_.word.c_str() : "(no entry)");
+                                       : (entryFound_ ? entryWord_.c_str() : "(no entry)");
   GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, title);
 
   const int contentTop = m.topPadding + m.headerHeight + m.verticalSpacing;
-  const int sidePad = m.contentSidePadding;
+  const int sidePad = m.contentSidePadding + 4;
   const int bodyW = pageW - sidePad * 2;
-  const int lh = renderer.getLineHeight(bodyFont());
+  const int lh = std::max(1, renderer.getLineHeight(bodyFont()));
   const int perPage = bodyLinesPerPage();
+  const int yMax = pageH - m.buttonHintsHeight - m.verticalSpacing -
+                   renderer.getLineHeight(SMALL_FONT_ID) - 6;
 
-  if (wrapped_.empty() && entry_.found)
-    wrapped_ = renderer.wrappedText(bodyFont(), entry_.definition.c_str(), bodyW, 4096);
+  const char* body = nullptr;
+  size_t bodyN = 0;
+  bool haveBody = false;
+  if (entryFound_ && dict_.currentBody(&body, &bodyN) && body && bodyN > 0) {
+    haveBody = true;
+  } else if (fallbackLen_ > 0) {
+    body = fallbackBuf_;
+    bodyN = fallbackLen_;
+    haveBody = true;
+  }
 
-  // drawText's y is the TOP of the line (it adds the ascender internally).
+  if (haveBody && (lineStarts_.empty() || bodyW_ != bodyW || wrapFont_ != bodyFont()))
+    rebuildLineStarts(bodyW);
+
   int y = contentTop;
   const int start = page_ * perPage;
-  for (int i = start; i < start + perPage && i < (int)wrapped_.size(); i++) {
-    renderer.drawText(bodyFont(), sidePad, y, wrapped_[i].c_str());
+  const int font = bodyFont();
+
+  // Empty lineStarts before the first real content used to push the image down
+  // (and move it when font size changed maxChars / phantom lines). Skip those.
+  bool sawContent = false;
+  for (int i = start; i < start + perPage && i < (int)lineStarts_.size(); i++) {
+    if (!haveBody) break;
+    if (y + lh > yMax) break;
+    const uint32_t a = lineStarts_[i];
+    const uint32_t b = (i + 1 < (int)lineStarts_.size()) ? lineStarts_[i + 1] : (uint32_t)bodyN;
+    uint32_t from = a;
+    while (from < b && (body[from] == ' ' || body[from] == '\t')) from++;
+
+    if (from + 2 < b && (unsigned char)body[from] == 0xE2 &&
+        (unsigned char)body[from + 1] == 0x80 && (unsigned char)body[from + 2] == 0xA2) {
+      from += 3;
+      while (from < b && (body[from] == ' ' || body[from] == '\t')) from++;
+      if (from >= b) { if (sawContent) y += lh; continue; }
+    }
+    uint32_t to = b;
+    while (to > from && (body[to - 1] == ' ' || body[to - 1] == '\t')) to--;
+    while (to >= from + 3 &&
+           (unsigned char)body[to - 3] == 0xE2 &&
+           (unsigned char)body[to - 2] == 0x80 &&
+           (unsigned char)body[to - 1] == 0xA2) {
+      to -= 3;
+      while (to > from && (body[to - 1] == ' ' || body[to - 1] == '\t')) to--;
+    }
+    if (to <= from) { if (sawContent) y += lh; continue; }
+
+    const size_t n = (size_t)(to - from);
+    char buf[512];
+    const size_t copy = n < sizeof(buf) - 1 ? n : sizeof(buf) - 1;
+    memcpy(buf, body + from, copy);
+    buf[copy] = '\0';
+
+    char slug[68];
+    if (parseImgToken(buf, copy, slug, sizeof(slug)) || strstr(buf, "@@IMG:") != nullptr) {
+      if (!parseImgToken(buf, copy, slug, sizeof(slug))) { if (sawContent) y += lh; continue; }
+      const int remain = yMax - y;
+      // Prefer ~45% of the content column so text still fits on page 1
+      const int budget = std::min(remain - lh, (yMax - contentTop) * 75 / 100);
+      if (budget < lh * 3) {
+        // Not enough room — skip image on this page (avoid clipped strip / huge hole)
+        continue;
+      }
+      const int maxImgH = std::max(lh * 4, budget);
+      const bool ok = drawImgAt(renderer, slug, sidePad, y, bodyW, maxImgH, imgMode_);
+      int drawnH = ok ? imgHeight(slug, bodyW, maxImgH) : 0;
+      if (ok && drawnH > 0) {
+        y += drawnH + 4;
+        sawContent = true;
+      }
+      continue;
+    }
+
+    if (copy >= 3 && buf[0] == '#' && buf[1] == '#' && buf[2] == ' ') {
+      const char* draw = buf + 3;
+      size_t dlen = strlen(draw);
+      while (dlen > 0 && (draw[dlen - 1] == ' ' || draw[dlen - 1] == '\t')) dlen--;
+      char hbuf[512];
+      if (dlen >= sizeof(hbuf)) dlen = sizeof(hbuf) - 1;
+      memcpy(hbuf, draw, dlen);
+      hbuf[dlen] = '\0';
+      const int hlh = std::max(1, renderer.getLineHeight(HEAD_FONT));
+      const int charW = std::max(5, (hlh * 2) / 5);
+      const int maxHChars = std::max(4, bodyW / charW);
+      if (i > start) y += (lh * 2) / 3;
+      size_t hpos = 0;
+      const size_t hlen = strlen(hbuf);
+      while (hpos < hlen) {
+        if (y + hlh > yMax) break;
+        size_t hend = std::min(hlen, hpos + (size_t)maxHChars);
+        if (hend < hlen) {
+          size_t brk = hend;
+          while (brk > hpos && hbuf[brk] != ' ' && hbuf[brk] != '\t') brk--;
+          if (brk > hpos) hend = brk;
+        }
+        while (hpos < hend && (hbuf[hpos] == ' ' || hbuf[hpos] == '\t')) hpos++;
+        if (hpos >= hend) { hpos = std::min(hlen, hpos + 1); continue; }
+        char linebuf[512];
+        size_t ln = hend - hpos;
+        if (ln >= sizeof(linebuf)) ln = sizeof(linebuf) - 1;
+        memcpy(linebuf, hbuf + hpos, ln);
+        linebuf[ln] = '\0';
+        renderer.drawText(HEAD_FONT, sidePad, y, linebuf);
+        y += hlh;
+        sawContent = true;
+        hpos = hend;
+        while (hpos < hlen && (hbuf[hpos] == ' ' || hbuf[hpos] == '\t')) hpos++;
+      }
+      y += lh / 3;
+      continue;
+    }
+
+    renderer.drawText(font, sidePad, y, buf);
     y += lh;
+    sawContent = true;
   }
 
   const auto labels = mappedInput.mapLabels("Home", "Search", "Prev", "Next");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
-  // The long-press affordance has nowhere to live in the hint bar without
-  // colliding with its neighbours, so state it once, quietly, on the left.
   char foot[64];
   snprintf(foot, sizeof(foot), "hold Search: random   hold Home: text size %dpt",
            BODY_PTS[fontStep_ < FONT_STEPS ? fontStep_ : 0]);
@@ -605,14 +1227,15 @@ void DictionaryActivity::render(RenderLock&&) {
                     pageH - m.buttonHintsHeight - m.verticalSpacing - renderer.getLineHeight(SMALL_FONT_ID),
                     foot);
 
-  const int totalPages = std::max(1, ((int)wrapped_.size() + perPage - 1) / perPage);
+  const int totalPages = std::max(1, ((int)lineStarts_.size() + perPage - 1) / perPage);
   if (totalPages > 1) {
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%d/%d", page_ + 1, totalPages);
+    char pbuf[24];
+    snprintf(pbuf, sizeof(pbuf), "%d/%d", page_ + 1, totalPages);
     renderer.drawText(SMALL_FONT_ID, pageW - sidePad - 40,
                       pageH - m.buttonHintsHeight - m.verticalSpacing - renderer.getLineHeight(SMALL_FONT_ID),
-                      buf);
+                      pbuf);
   }
 
   renderer.displayBuffer();
 }
+

@@ -42,8 +42,12 @@
 class WcdbReader {
  public:
   struct Entry {
-    std::string word;        // display word ("orig -> target" when redirected)
-    std::string definition;  // redirect already resolved
+    std::string word;  // display title (short; stays in SSO for typical titles)
+    // Body is NOT a std::string — that abort()s on the X4 when next/random
+    // allocate a second heap block beside WCDB's ~70KB buffers.
+    // Points into decBuf_ (valid until next decompress) or a short static.
+    const char* definition = nullptr;
+    size_t defLen = 0;
     bool found = false;
   };
 
@@ -63,6 +67,11 @@ class WcdbReader {
   Entry next();          // advance cursor one word (wraps)
   Entry prev();          // retreat cursor one word (wraps)
   Entry randomEntry();   // random block + random line; moves the cursor
+
+  // Phase 1b: pointer into the decompressed block for the cursor entry's body.
+  // Valid until the next decompressBlock (any lookup/next/prev/random).
+  // No heap copy — body can be the full WCDB record (up to ~32KB).
+  bool currentBody(const char** ptr, size_t* len);
 
  private:
   struct BlockIdx {
@@ -111,7 +120,11 @@ class DictionaryActivity final : public Activity {
   // exactly as the watch's curRef did. See HomeActivity::onGazetteerOpen().
   DictionaryActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                      const char* cdbPath = "/dictionary.cdb", const char* title = "Dictionary")
-      : Activity(title, renderer, mappedInput), cdbPath_(cdbPath), title_(title) {}
+      : Activity(title, renderer, mappedInput),
+        cdbPathOwned_(cdbPath ? cdbPath : "/dictionary.cdb"),
+        titleOwned_(title ? title : "Dictionary"),
+        cdbPath_(cdbPathOwned_.c_str()),
+        title_(titleOwned_.c_str()) {}
 
   void onEnter() override;
   void onExit() override;
@@ -124,17 +137,34 @@ class DictionaryActivity final : public Activity {
   void setEntry(const WcdbReader::Entry& e);
   void openSearch();
   int bodyLinesPerPage() const;
+  void resetPaging();
+  void rebuildLineStarts(int bodyW);
+  void saveResume() const;
+  void tryRestoreResume();
 
+  std::string cdbPathOwned_;
+  std::string titleOwned_;
   const char* cdbPath_;
   const char* title_;
 
   WcdbReader dict_;
   ButtonNavigator nav_;
 
-  WcdbReader::Entry entry_;
-  std::vector<std::string> wrapped_;
+  // Title only; body is read live from WcdbReader::currentBody() (decBuf_).
+  // Short fallback for "see: target" when the block still holds a '>' redirect.
+  std::string entryWord_;
+  bool entryFound_ = false;
+  size_t bodyLen_ = 0;
+  char fallbackBuf_[192];
+  size_t fallbackLen_ = 0;
+
+  // Byte offsets of visual lines into the body (rebuilt when width/font/entry change).
+  std::vector<uint32_t> lineStarts_;
   std::string status_;  // transient message ("Not found: xyz")
   int page_ = 0;
+  int pagesSinceFull_ = 0;
+  int bodyW_ = 0;
+  int wrapFont_ = -1;
   bool loadError_ = false;
 
   bool confirmHeld_ = false;
@@ -146,6 +176,12 @@ class DictionaryActivity final : public Activity {
   // available steps depend on the build variant: only font sizes whose data
   // survives the OMIT_*_FONT flags are offered (see BODY_FONTS in the .cpp).
   uint8_t fontStep_ = 0;
+  // 0=dither 1=no-dither 2=t160 3=t128 4=t96 — hold Prev to cycle
+  static constexpr uint8_t IMG_MODE_COUNT = 5;
+  uint8_t imgMode_ = 1;
+  bool leftHeld_ = false;
+  bool leftLongHandled_ = false;
   int bodyFont() const;
   void cycleFont();
+  void cycleImgMode();
 };
