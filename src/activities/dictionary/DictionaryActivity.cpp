@@ -90,9 +90,10 @@ bool WcdbReader::begin(const char* path) {
   const size_t need = INDEX_OFFSET + (size_t)blocks_ * RECORD_SIZE;
   if (file_.size() < need) return false;
 
-  // Do not reserve MAX_RAW/MAX_COMP here. 64k+68k at open() OOMs the C3
-  // and reboots even for small CDBs. decompressBlock resizes to the
-  // actual block (validated against MAX_RAW).
+  // Reserve once to MAX (32k). Avoids realloc/fragmentation on every Next.
+  // 32k+~35k fits the C3 when done once at open (not 64k).
+  decBuf_.reserve(MAX_RAW);
+  compBuf_.reserve(MAX_COMP);
 
   curBlk_ = curLine_ = 0;
   ready_ = true;
@@ -117,8 +118,7 @@ void WcdbReader::end() {
   if (file_) file_.close();
   decBuf_.clear();
   compBuf_.clear();
-  decBuf_.shrink_to_fit();
-  compBuf_.shrink_to_fit();
+  // keep capacity — shrink_to_fit fragments the heap on the C3
   decSize_ = 0;
   cachedBlk_ = -1;
   curBlk_ = curLine_ = 0;
@@ -141,23 +141,20 @@ bool WcdbReader::decompressBlock(int idx) {
   if (b.compSize == 0 || b.compSize > MAX_COMP) return false;
   if ((uint64_t)b.offset + b.compSize > (uint64_t)file_.size()) return false;
 
-  // Only inflate what we will display. 60k articles were crashing; 54k is safe.
-  const uint32_t want = b.rawSize > (uint32_t)kMaxEntryDef ? (uint32_t)kMaxEntryDef : b.rawSize;
+  // Full block (already <= MAX_RAW). Do NOT clamp to kMaxEntryDef here —
+  // that truncated multi-article blocks and broke Next/Random.
+  const uint32_t want = b.rawSize;
 
-  compBuf_.resize(b.compSize);
+compBuf_.resize(b.compSize);
   decBuf_.resize(want);
 
   if (!file_.seek(b.offset)) return false;
   if (file_.read(compBuf_.data(), b.compSize) != (int)b.compSize) return false;
 
-  // Raw DEFLATE (wbits -15): no zlib header, so do NOT call skipZlibHeader().
   InflateReader inf;
-  inf.init();  // one-shot: the whole block is in memory
+  inf.init();
   inf.setSource(compBuf_.data(), b.compSize);
-  // InflateReader returns false if the stream isn't fully consumed.
-  // We stop at `want` on purpose for long articles — that is still success.
-  const bool complete = inf.read(decBuf_.data(), (int)want);
-  if (!complete && want >= b.rawSize) return false;
+  if (!inf.read(decBuf_.data(), (int)want)) return false;
 
   decSize_ = want;
   cachedBlk_ = idx;
@@ -331,7 +328,7 @@ bool WcdbReader::currentBody(const char** ptr, size_t* len) {
 
 WcdbReader::Entry WcdbReader::next() {
   if (!ready_) return Entry{};
-  for (int attempt = 0; attempt < 64; attempt++) {
+  for (int attempt = 0; attempt < 256; attempt++) {
     if (!decompressBlock(curBlk_)) {
       curBlk_ = (curBlk_ + 1) % (int)blocks_;
       curLine_ = 0;
@@ -385,7 +382,7 @@ WcdbReader::Entry WcdbReader::prev() {
 
 WcdbReader::Entry WcdbReader::randomEntry() {
   if (!ready_ || blocks_ == 0) return Entry{};
-  for (int attempt = 0; attempt < 64; attempt++) {
+  for (int attempt = 0; attempt < 256; attempt++) {
     const int rb = (int)(esp_random() % blocks_);
     if (!decompressBlock(rb)) continue;
     const int lines = linesInBlock();
@@ -677,31 +674,35 @@ void DictionaryActivity::tryRestoreResume() {
 void DictionaryActivity::onEnter() {
   Activity::onEnter();
   ButtonNavigator::setMappedInputManager(mappedInput);
-
   {
     Preferences p;
     p.begin("almanac", true);
     fontStep_ = p.getUChar("dictfont", 0);
-    imgMode_ = p.getUChar("dictimg", 1);  // default: Bitmap no-dither (lighter)
+    imgMode_ = p.getUChar("dictimg", 1);
     p.end();
     if (fontStep_ >= FONT_STEPS) fontStep_ = 0;
     if (imgMode_ >= IMG_MODE_COUNT) imgMode_ = 1;
   }
 
-  loadError_ = !dict_.begin(cdbPath_);
   confirmHeld_ = confirmLongHandled_ = sawBackPress_ = backLongHandled_ = leftHeld_ = leftLongHandled_ = false;
+
+  loadError_ = !dict_.begin(cdbPath_);
   if (!loadError_) {
-    tryRestoreResume();
-    if (entryWord_.empty()) {
-      WcdbReader::Entry e = dict_.currentEntry();
-      for (int i = 0; i < 32 && !bodyUsable(e); i++) {
-        e = dict_.next();
-      }
+    // No tryRestoreResume() — avoids abort on bad/stale NVS path under Almanac.
+    WcdbReader::Entry e = dict_.currentEntry();
+    for (int n = 0; n < 16 && !(e.found && e.definition && e.defLen > 0 && e.definition[0] != '>'); n++) {
+      e = dict_.next();
+    }
+    if (e.found) {
       setEntry(e);
+    } else {
+      entryFound_ = false;
+      entryWord_.clear();
     }
   }
   requestUpdate();
 }
+
 
 void DictionaryActivity::onExit() {
   if (!loadError_ && !entryWord_.empty()) {
@@ -758,10 +759,8 @@ void DictionaryActivity::setEntry(const WcdbReader::Entry& e) {
     fallbackLen_ = e.defLen;
     fallbackBuf_[fallbackLen_] = 0;
   }
-  // Persist last article for boot resume (path + word; page updated on exit too)
-  if (!entryWord_.empty()) {
-    saveResume();
-  }
+  // Resume disabled for Almanac stability (re-enable later if needed)
+  // if (!entryWord_.empty()) { saveResume(); }
 }
 
 
@@ -890,66 +889,6 @@ void DictionaryActivity::rebuildLineStarts(int bodyW) {
 }
 
 
-
-std::vector<WcdbReader::TitleRef> WcdbReader::listTitles(int startBlk, int startLine, int maxN) {
-  std::vector<TitleRef> out;
-  if (!ready_ || maxN <= 0 || blocks_ == 0) return out;
-  int b = startBlk < 0 ? 0 : startBlk;
-  int l = startLine;
-  while (b < (int)blocks_ && (int)out.size() < maxN) {
-    if (!decompressBlock(b)) {
-      b++;
-      l = 0;
-      continue;
-    }
-    const int nlines = linesInBlock();
-    if (l < 0) l = 0;
-    while (l < nlines && (int)out.size() < maxN) {
-      Entry e = entryInBlock(l);
-      if (e.found && !e.word.empty() && !(e.definition && e.defLen > 0 && e.definition[0] == '>')) {
-        TitleRef r;
-        r.word = e.word;
-        r.blk = b;
-        r.line = l;
-        out.push_back(std::move(r));
-      }
-      l++;
-    }
-    b++;
-    l = 0;
-  }
-  return out;
-}
-
-bool WcdbReader::stepBackTitles(int& blk, int& line, int n) {
-  if (!ready_ || n <= 0) return false;
-  int b = blk;
-  int l = line;
-  int left = n;
-  while (left > 0) {
-    l--;
-    if (l < 0) {
-      b--;
-      if (b < 0) {
-        blk = 0;
-        line = 0;
-        return false;
-      }
-      if (!decompressBlock(b)) {
-        blk = b;
-        line = 0;
-        return false;
-      }
-      l = linesInBlock() - 1;
-      if (l < 0) continue;
-    }
-    left--;
-  }
-  blk = b;
-  line = l < 0 ? 0 : l;
-  return true;
-}
-
 int DictionaryActivity::bodyLinesPerPage() const {
   const auto& m = UITheme::getInstance().getMetrics();
   const int top = m.topPadding + m.headerHeight + m.verticalSpacing;
@@ -957,42 +896,6 @@ int DictionaryActivity::bodyLinesPerPage() const {
                      renderer.getLineHeight(SMALL_FONT_ID) + 8;
   const int usable = renderer.getScreenHeight() - top - footer;
   return std::max(1, usable / renderer.getLineHeight(bodyFont()));
-}
-
-
-void DictionaryActivity::enterIndex(const std::string& prefix) {
-  indexMode_ = true;
-  indexSel_ = 0;
-  indexHist_.clear();
-  indexBlk_ = 0;
-  indexLine_ = 0;
-  if (!prefix.empty()) {
-    indexBlk_ = std::max(0, dict_.findBlock(prefix));
-    indexLine_ = 0;
-  }
-  fillIndexPage();
-}
-
-void DictionaryActivity::fillIndexPage() {
-  indexPage_ = dict_.listTitles(indexBlk_, indexLine_, 10);
-  if (!indexPage_.empty()) {
-    indexEndBlk_ = indexPage_.back().blk;
-    indexEndLine_ = indexPage_.back().line + 1;
-  } else {
-    indexEndBlk_ = indexBlk_;
-    indexEndLine_ = indexLine_;
-  }
-  if (indexSel_ >= (int)indexPage_.size())
-    indexSel_ = std::max(0, (int)indexPage_.size() - 1);
-}
-
-void DictionaryActivity::openIndexSelection() {
-  if (indexPage_.empty() || indexSel_ < 0 || indexSel_ >= (int)indexPage_.size()) return;
-  auto e = dict_.lookup(indexPage_[indexSel_].word);
-  if (!e.found) return;
-  indexMode_ = false;
-  status_.clear();
-  setEntry(e);
 }
 
 void DictionaryActivity::openSearch() {
@@ -1003,11 +906,25 @@ void DictionaryActivity::openSearch() {
       return;
     }
     const auto* kr = std::get_if<KeyboardResult>(&res.data);
-    if (!kr) {
+    if (!kr || kr->text.empty()) {
       requestUpdate(true);
       return;
     }
-    enterIndex(kr->text);
+    const std::string typed = kr->text;
+
+    WcdbReader::Entry e = dict_.lookup(typed);
+    if (e.found) {
+      status_.clear();
+      setEntry(e);
+    } else {
+      auto matches = dict_.prefixSearch(typed, 1);
+      if (!matches.empty()) {
+        status_.clear();
+        setEntry(dict_.lookup(matches[0]));
+      } else {
+        status_ = "Not found: " + typed;
+      }
+    }
     requestUpdate(true);
   };
   startActivityForResult(
@@ -1034,74 +951,6 @@ void DictionaryActivity::loop() {
   if (loadError_) {
     if (mappedInput.wasPressed(MappedInputManager::Button::Back)) sawBackPress_ = true;
     if (mappedInput.wasReleased(MappedInputManager::Button::Back) && sawBackPress_) finish();
-    return;
-  }
-
-
-  if (indexMode_) {
-    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-      indexMode_ = false;
-      requestUpdate();
-      return;
-    }
-    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      openIndexSelection();
-      requestUpdate();
-      return;
-    }
-    if (mappedInput.wasPressed(MappedInputManager::Button::Down)) {
-      if (indexSel_ + 1 < (int)indexPage_.size()) {
-        indexSel_++;
-      } else if (!indexPage_.empty()) {
-        indexHist_.push_back({indexBlk_, indexLine_});
-        if (indexHist_.size() > 80) indexHist_.erase(indexHist_.begin());
-        indexBlk_ = indexEndBlk_;
-        indexLine_ = indexEndLine_;
-        indexSel_ = 0;
-        fillIndexPage();
-      }
-      requestUpdate();
-      return;
-    }
-    if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
-      if (indexSel_ > 0) {
-        indexSel_--;
-      } else if (!indexHist_.empty()) {
-        auto p = indexHist_.back();
-        indexHist_.pop_back();
-        indexBlk_ = p.first;
-        indexLine_ = p.second;
-        indexSel_ = 0;
-        fillIndexPage();
-        if (!indexPage_.empty()) indexSel_ = (int)indexPage_.size() - 1;
-      }
-      requestUpdate();
-      return;
-    }
-    if (mappedInput.wasPressed(MappedInputManager::Button::Right)) {
-      if (!indexPage_.empty()) {
-        indexHist_.push_back({indexBlk_, indexLine_});
-        if (indexHist_.size() > 80) indexHist_.erase(indexHist_.begin());
-        indexBlk_ = indexEndBlk_;
-        indexLine_ = indexEndLine_;
-        indexSel_ = 0;
-        fillIndexPage();
-        requestUpdate();
-      }
-      return;
-    }
-    if (mappedInput.wasPressed(MappedInputManager::Button::Left)) {
-      if (!indexHist_.empty()) {
-        auto p = indexHist_.back();
-        indexHist_.pop_back();
-        indexBlk_ = p.first;
-        indexLine_ = p.second;
-        indexSel_ = 0;
-        fillIndexPage();
-        requestUpdate();
-      }
-      return;
-    }
     return;
   }
 
@@ -1224,36 +1073,8 @@ void DictionaryActivity::loop() {
 }
 
 void DictionaryActivity::render(RenderLock&&) {
+  // Full clear every frame — partial e-ink refresh was stacking pages/boot logo
   renderer.clearScreen();
-
-  if (indexMode_ && !loadError_) {
-    const auto& m = UITheme::getInstance().getMetrics();
-    const int pageW = renderer.getScreenWidth();
-    const int pageH = renderer.getScreenHeight();
-    GUI.drawHeader(renderer, Rect{0, m.topPadding, pageW, m.headerHeight}, "Index");
-    const int sidePad = m.contentSidePadding + 4;
-    int y = m.topPadding + m.headerHeight + m.verticalSpacing;
-    const int lh = std::max(1, renderer.getLineHeight(UI_12_FONT_ID));
-    const int yMax = pageH - m.buttonHintsHeight - 8;
-    if (indexPage_.empty()) {
-      renderer.drawText(UI_12_FONT_ID, sidePad, y, "(no titles)");
-    } else {
-      for (int i = 0; i < (int)indexPage_.size(); i++) {
-        if (y + lh > yMax) break;
-        const bool sel = (i == indexSel_);
-        const char* w = indexPage_[i].word.c_str();
-        if (sel) {
-          renderer.fillRect(sidePad / 2, y - 1, pageW - sidePad, lh + 2, true);
-        }
-        renderer.drawText(UI_12_FONT_ID, sidePad, y, w, sel);
-        y += lh + 2;
-      }
-    }
-    GUI.drawButtonHints(renderer, "Back", "Open", "Up", "Down");
-    renderer.displayBuffer();
-    return;
-  }
-
 
   const auto& m = UITheme::getInstance().getMetrics();
   const int pageW = renderer.getScreenWidth();
@@ -1400,7 +1221,7 @@ void DictionaryActivity::render(RenderLock&&) {
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   char foot[64];
-  snprintf(foot, sizeof(foot), "Search: index   hold Search: random %dpt",
+  snprintf(foot, sizeof(foot), "hold Search: random   hold Home: text size %dpt",
            BODY_PTS[fontStep_ < FONT_STEPS ? fontStep_ : 0]);
   renderer.drawText(SMALL_FONT_ID, sidePad,
                     pageH - m.buttonHintsHeight - m.verticalSpacing - renderer.getLineHeight(SMALL_FONT_ID),

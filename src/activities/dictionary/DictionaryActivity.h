@@ -63,16 +63,6 @@ class WcdbReader {
   // Up to maxResults words beginning with prefix. Does not move the cursor.
   std::vector<std::string> prefixSearch(const std::string& prefix, int maxResults = 10);
 
-  struct TitleRef {
-    std::string word;
-    int blk = 0;
-    int line = 0;
-  };
-  std::vector<TitleRef> listTitles(int startBlk, int startLine, int maxN);
-  bool stepBackTitles(int& blk, int& line, int n);
-  int findBlock(const std::string& query);
-
-
   Entry currentEntry();  // entry at the cursor
   Entry next();          // advance cursor one word (wraps)
   Entry prev();          // retreat cursor one word (wraps)
@@ -103,6 +93,7 @@ class WcdbReader {
   static constexpr uint32_t MAX_COMP = MAX_RAW + MAX_RAW / 16 + 64;
 
   bool readRecord(uint32_t idx, BlockIdx& out);   // 44 bytes, straight off the card
+  int findBlock(const std::string& query);        // last block whose firstWord <= query
   bool decompressBlock(int idx);                  // into decBuf_, cached
   int linesInBlock() const;                       // lines in the cached block
   Entry entryInBlock(int lineIdx) const;          // raw (redirect NOT resolved)
@@ -145,10 +136,6 @@ class DictionaryActivity final : public Activity {
 
   void setEntry(const WcdbReader::Entry& e);
   void openSearch();
-  void enterIndex(const std::string& prefix = {});
-  void fillIndexPage();
-  void openIndexSelection();
-
   int bodyLinesPerPage() const;
   void resetPaging();
   void rebuildLineStarts(int bodyW);
@@ -179,16 +166,6 @@ class DictionaryActivity final : public Activity {
   int bodyW_ = 0;
   int wrapFont_ = -1;
   bool loadError_ = false;
-
-  bool indexMode_ = false;
-  int indexSel_ = 0;
-  int indexBlk_ = 0;
-  int indexLine_ = 0;
-  int indexEndBlk_ = 0;
-  int indexEndLine_ = 0;
-  std::vector<WcdbReader::TitleRef> indexPage_;
-  std::vector<std::pair<int, int>> indexHist_;
-
 
   bool confirmHeld_ = false;
   bool confirmLongHandled_ = false;
